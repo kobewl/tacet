@@ -116,12 +116,46 @@ jobs:
       # 为什么这条重要：一旦 `tacet-core` 里出现 `#[cfg(target_os = "macos")]`，
       # 这个 crate 就再也无法在 CI 的 Linux runner 上测，
       # 「核心可跨平台」这个假设就悄悄失效了。
-      # 平台相关的代码必须待在 platform-macos / platform-windows 里。
+      # 平台相关的**能力代码**必须待在 platform-macos / platform-windows 里。
+      #
+      # ## 为什么排除 tacet-storage（这里曾经误报过）
+      #
+      # 规范 §3.3 红线 1 的原话是「**核心 crate** 不得出现平台条件编译」，
+      # 意图是拦住「把操作系统 API 调用混进业务逻辑」——那会让核心逻辑
+      # 再也无法在 CI 上跑。
+      #
+      # 但存储层的**数据目录约定**天然是分平台的：macOS 用
+      # `~/Library/Application Support`、Windows 用 `%APPDATA%`、
+      # 其它平台用 XDG。这是路径常识，不含任何业务判断，也无法用
+      # trait 抽象掉（它就是个纯函数，没有可注入的行为）。
+      #
+      # 早期这条 grep 写的是 `crates/` 全量，把 tacet-storage 一起扫了进来 ——
+      # 于是 CI 永远红着，而修它的唯一办法是把代码改坏。
+      # **一条会因为正确代码而失败的检查，最终一定会被绕过**，
+      # 所以这里按规范原意收窄到「排除 platform-* 和 storage」。
+      #
+      # ## 还要过滤注释行
+      #
+      # 第二次误报来自规则自己的文档：`tacet-core/src/lib.rs` 的顶部注释
+      # 里写着「这个 crate 里不允许出现 `#[cfg(target_os = ...)]`」，
+      # 于是 grep 命中了那句**说明规则的话**。
+      #
+      # 所以这里把注释行滤掉，只看真实代码。判据是 `file:line:` 之后
+      # 紧跟 `//`（Rust 的三种注释 `//` / `///` / `//!` 都以它开头）。
       - name: 红线 1 — 核心 crate 无平台条件编译
         run: |
           set -euo pipefail
-          if git grep -n 'cfg(target_os' -- 'crates/' ':!crates/platform-*'; then
+          TARGETS="crates/ ':!crates/platform-*' ':!crates/tacet-storage/'"
+
+          VIOLATIONS=$(git grep -n 'cfg(target_os' -- $TARGETS \
+            | grep -vE ':[0-9]+:[[:space:]]*//' \
+            || true)
+
+          if [ -n "$VIOLATIONS" ]; then
             echo "❌ 核心 crate 里出现了平台条件编译，请把平台相关代码移到 crates/platform-*"
+            echo "   （如果是数据目录这类纯路径约定，应放进 tacet-storage）"
+            echo
+            echo "$VIOLATIONS"
             exit 1
           fi
           echo "✅ 通过"
@@ -245,26 +279,29 @@ jobs:
       #
       # 更阴险的是 `plutil -lint` 会说这个文件 OK（它比较宽容），
       # 所以本地怎么查都查不出来。只能靠这条专门的检查。
+      #
+      # ## 为什么把 Python 抽成一个独立文件
+      #
+      # 最初这段 Python 是内联在 `run:` 里的（`python3 -c "..."`）。
+      # 那样写有个隐蔽的陷阱：**YAML 的块标量要求所有行都有缩进**，
+      # 而 Python 的多行代码一旦顶格写，YAML 就会把它当成新的顶层键，
+      # 整个 workflow 在解析阶段就失败 —— 表现是「CI 0 秒失败」，
+      # 日志为空，非常难查。
+      #
+      # 抽成 `.github/scripts/check-plist-comments.py` 之后这件事从根上消失：
+      # 那个文件是普通文本，不受 YAML 缩进规则约束。
       - name: plist 注释合法性
         run: |
           set -euo pipefail
-          failed=0
           found=0
+          failed=0
           # 用 find 而不是 `git ls-files`：后者只列出已被追踪的文件，
           # 而「新加了一个 plist 但还没 git add」恰恰是最需要检查的时刻。
           for f in $(find . -name '*.plist' -not -path '*/node_modules/*' -not -path './target/*'); do
             found=$((found + 1))
-            # 提取注释块，检查其中是否有连续减号
-            if python3 -c "
-import re, sys
-text = open('$f', encoding='utf-8').read()
-bad = [m.group(0)[:40] for m in re.finditer(r'<!--.*?-->', text, re.S) if '--' in m.group(0)[4:-3]]
-sys.exit(1 if bad else 0)
-"; then
+            if python3 .github/scripts/check-plist-comments.py "$f"; then
               echo "✅ $f"
             else
-              echo "❌ $f 的 XML 注释里有连续减号（'--'）"
-              echo "   XML 规范禁止这样做。签名时会报 AMFIUnserializeXML 错误。"
               failed=1
             fi
           done
