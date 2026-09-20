@@ -199,6 +199,7 @@ const mockSnapshot: AppSnapshot = {
     actions: ["喝几口水"],
   },
   breakRemainingSeconds: null,
+  breakTotalSeconds: null,
   capabilities: [
     { name: "idle_detection", displayName: "空闲检测", available: true, reason: null },
     { name: "foreground_app", displayName: "前台应用识别", available: true, reason: null },
@@ -303,6 +304,10 @@ function applyDevOverrides(): void {
     mockSnapshot.state = state;
     mockSnapshot.breakRemainingSeconds =
       state === "breaking" ? Number(params.get("remaining") ?? 300) : null;
+    // 总时长必须跟着一起给：界面用 `remaining=240&state=breaking` 这种
+    // 链接预览休息页时，分母也得有个值，否则进度环会除以 0。
+    mockSnapshot.breakTotalSeconds =
+      state === "breaking" ? Number(params.get("total") ?? 300) : null;
   }
 }
 
@@ -365,6 +370,7 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     case "start_break":
       mockSnapshot.state = "breaking";
       mockSnapshot.breakRemainingSeconds = 300;
+      mockSnapshot.breakTotalSeconds = 300;
       return snapshot();
 
     case "end_break": {
@@ -375,6 +381,7 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
 
       mockSnapshot.state = "working";
       mockSnapshot.breakRemainingSeconds = null;
+      mockSnapshot.breakTotalSeconds = null;
       mockSnapshot.today.breakCompletedCount += 1;
       mockSnapshot.needs.rest = 0;
       // 休息结束后，这条 Intent 就算「已经还给你了」
@@ -386,12 +393,14 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     case "skip_break":
       mockSnapshot.state = "working";
       mockSnapshot.breakRemainingSeconds = null;
+      mockSnapshot.breakTotalSeconds = null;
       mockSnapshot.today.breakSkippedCount += 1;
       return snapshot();
 
     case "snooze_break":
       mockSnapshot.state = "working";
       mockSnapshot.breakRemainingSeconds = null;
+      mockSnapshot.breakTotalSeconds = null;
       mockSnapshot.today.breakSnoozedCount += 1;
       return snapshot();
 

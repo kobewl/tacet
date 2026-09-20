@@ -166,6 +166,91 @@ impl EventRepo {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
         Ok(count.max(0) as u32)
     }
+
+    /// 按**发生顺序**读取休息的生命周期事件（开始 / 完成 / 跳过）。
+    ///
+    /// ## 为什么按 id 排序而不是按时间
+    ///
+    /// `occurred_at` 是「事件发生的时间」，理论上单调递增，但它来自调用方
+    /// 传进来的时间戳 —— 补记历史、时钟回拨、休眠唤醒都可能让两条事件
+    /// 的时间戳相同甚至倒挂。
+    ///
+    /// 而这里要回答的问题是「哪条在前、哪条在后」，那必须按**写入顺序**
+    /// 判断（`id` 是自增主键）。用时间排序会在时间戳打平时给出不确定的
+    /// 结果 —— 对「配对」这种语义来说，顺序错了整个判断就反了。
+    ///
+    /// ## 不受条数限制
+    ///
+    /// 调用方拿它做的是「把整部历史配对一遍」，截断会让尾巴上的
+    /// 未闭合记录被漏掉 —— 那正是这个函数要解决的问题本身。
+    /// 事件表的数据量是「每天几十条」，全量读完没有任何压力。
+    pub fn break_lifecycle(db: &Database) -> Result<Vec<EventRow>> {
+        let conn = db.lock();
+        let mut statement = conn.prepare(
+            "SELECT id, kind, payload, occurred_at, created_at FROM events \
+             WHERE kind IN (?1, ?2, ?3) ORDER BY id ASC",
+        )?;
+
+        let rows = statement
+            .query_map(
+                params![
+                    BehaviorKind::BreakStarted.as_str(),
+                    BehaviorKind::BreakCompleted.as_str(),
+                    BehaviorKind::BreakSkipped.as_str(),
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        rows.into_iter()
+            .map(|(id, kind, payload, occurred_at, created_at)| {
+                Ok(EventRow {
+                    id,
+                    kind: BehaviorKind::parse(&kind)
+                        .ok_or_else(|| data_error("事件类型", &kind))?,
+                    payload,
+                    occurred_at: Timestamp::from_millis(occurred_at),
+                    created_at: Timestamp::from_millis(created_at),
+                })
+            })
+            .collect()
+    }
+
+    /// **严格晚于** `after` 的最早一条事件的发生时间（不限类型）；没有则为 `None`。
+    ///
+    /// ## 它回答的是「我们最晚在什么时候知道应用还活着」
+    ///
+    /// 应用在休息途中被重启时，那条 `break.started` 就永远等不到结尾了
+    /// （详见 `AppState::close_dangling_break`）。要给它补一个结束时刻，
+    /// 唯一能依据的证据就是：**在那之后的某条事件发生时，应用一定已经
+    /// 重新活过来了，休息不可能还在继续**。
+    ///
+    /// 所以这个值是一个**上界**——真实的结束时刻只会更早。文档里必须
+    /// 说清楚这一点，因为「上界」和「准确值」在统计上的含义不同。
+    ///
+    /// 用严格大于（`>`）而不是大于等于：如果 `after` 那一毫秒上还有
+    /// 别的记录，那是同一时刻的事，不能拿来当作「之后」的证据。
+    pub fn first_after(db: &Database, after: Timestamp) -> Result<Option<Timestamp>> {
+        let conn = db.lock();
+        let value: Option<i64> = conn
+            .query_row(
+                "SELECT MIN(occurred_at) FROM events WHERE occurred_at > ?1",
+                params![after.as_millis()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        Ok(value.map(Timestamp::from_millis))
+    }
 }
 
 #[cfg(test)]
@@ -357,5 +442,73 @@ mod tests {
         EventRepo::append(&db, BehaviorKind::BreakCompleted, "{}", t0()).expect("写入");
 
         assert_eq!(EventRepo::count_all(&db).expect("统计"), 2);
+    }
+
+    // ======================================================== 休息生命周期
+
+    /// `break_lifecycle` 只取三种休息事件，且按写入顺序给出。
+    ///
+    /// 「按写入顺序」是它的关键契约：调用方拿它做**配对**
+    /// （started 与 completed/skipped 一一对应），顺序错了配对就反了。
+    #[test]
+    fn 休息生命周期只含三种事件且按写入顺序() {
+        let db = Database::open_in_memory().expect("打开");
+        let t = |s: i64| t0().saturating_add_millis(s * 1000);
+
+        EventRepo::append(&db, BehaviorKind::WaterLogged, "{}", t(0)).expect("写入");
+        EventRepo::append(&db, BehaviorKind::BreakStarted, "{}", t(1)).expect("写入");
+        EventRepo::append(&db, BehaviorKind::WaterLogged, "{}", t(2)).expect("写入");
+        EventRepo::append(&db, BehaviorKind::BreakCompleted, "{}", t(3)).expect("写入");
+        EventRepo::append(&db, BehaviorKind::BreakStarted, "{}", t(4)).expect("写入");
+        EventRepo::append(&db, BehaviorKind::BreakSkipped, "{}", t(5)).expect("写入");
+
+        let kinds: Vec<&str> = EventRepo::break_lifecycle(&db)
+            .expect("读取")
+            .iter()
+            .map(|row| row.kind.as_str())
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                "break.started",
+                "break.completed",
+                "break.started",
+                "break.skipped"
+            ],
+            "喝水和其它事件不该混进来"
+        );
+    }
+
+    /// `first_after` 返回严格晚于给定时刻的**最早**一条事件。
+    ///
+    /// 它是「未闭合休息」补记时唯一的依据：那条 started 之后最早出现的
+    /// 事件发生时，应用一定已经重新活过来了，所以休息必然已结束。
+    #[test]
+    fn 查询某时刻之后最早的事件() {
+        let db = Database::open_in_memory().expect("打开");
+        let t = |s: i64| t0().saturating_add_millis(s * 1000);
+
+        EventRepo::append(&db, BehaviorKind::BreakStarted, "{}", t(0)).expect("写入");
+        EventRepo::append(&db, BehaviorKind::WaterLogged, "{}", t(44)).expect("写入");
+        EventRepo::append(&db, BehaviorKind::WorkStarted, "{}", t(1200)).expect("写入");
+
+        assert_eq!(
+            EventRepo::first_after(&db, t(0)).expect("查询"),
+            Some(t(44)),
+            "应当取 44 秒后那条，而不是最后一条"
+        );
+
+        assert_eq!(
+            EventRepo::first_after(&db, t(44)).expect("查询"),
+            Some(t(1200)),
+            "严格大于：恰好等于给定时刻的那条不算「之后」"
+        );
+
+        assert_eq!(
+            EventRepo::first_after(&db, t(5000)).expect("查询"),
+            None,
+            "之后没有任何事件时应当是 None"
+        );
     }
 }

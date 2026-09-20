@@ -78,6 +78,12 @@ pub struct AppState {
     pub last_interruption_at: Option<Timestamp>,
     /// 本次休息的结束时刻；不在休息中时为 `None`。
     pub break_ends_at: Option<Timestamp>,
+    /// 本次休息**计划的总时长**（秒）；不在休息中时为 `None`。
+    ///
+    /// 与 `break_ends_at` 是一对：一个记「什么时候结束」，一个记「一共多久」。
+    /// 后者是进度环的分母，必须是整段休息里唯一不变的那个数 ——
+    /// 详见 [`AppState::break_total_seconds`]。
+    pub break_planned_seconds: Option<u32>,
     /// 用户延后到什么时候之前都不再打扰；没有延后时为 `None`。
     ///
     /// 与 `break_ends_at` 是两回事：前者是「用户正在休息，休息本身有结束时刻」，
@@ -96,7 +102,7 @@ impl AppState {
         let now = Timestamp::now();
         let idle_threshold_ms = prefs.idle_threshold_seconds() as i64 * 1000;
 
-        Ok(Self {
+        let mut state = Self {
             platform,
             db,
             bus: EventBus::new(),
@@ -110,9 +116,124 @@ impl AppState {
             last_intervention_id: None,
             last_interruption_at: None,
             break_ends_at: None,
+            break_planned_seconds: None,
             snooze_until: None,
             paused: false,
-        })
+        };
+
+        state.close_dangling_break(now)?;
+        Ok(state)
+    }
+
+    /// 收尾上一次运行留下的「未闭合的休息」。
+    ///
+    /// ## 为什么需要这件事
+    ///
+    /// 休息的结束时刻（`break_ends_at`）只存在于内存里，**不落库**。
+    /// 所以应用在休息途中被重启（用户主动退出、崩溃、系统更新）时，
+    /// 内存状态回到初始值，而 `break.started` 事件已经写进库了 ——
+    /// 那条事件永远等不到它的 `break.completed`。
+    ///
+    /// 后果会在两个地方显现：
+    ///
+    /// 1. **统计失真**：查真实数据库时看到过一条休息记录了 1475 秒
+    ///    （24.5 分钟），而用户设的是 5 分钟 —— 那多出来的时间其实是
+    ///    应用重启到下一次有人操作之间的空档。
+    /// 2. **状态悬空**：如果那条 `break.started` 之后又有新的行为被记录，
+    ///    统计口径会把两段本不相干的时间连起来算。
+    ///
+    /// ## 为什么在启动时补一条完成事件，而不是删掉那条 started
+    ///
+    /// 删记录是篡改历史 —— 用户确实开始过那次休息，那是个事实。
+    /// 补一条「完成」则如实说明了「这次休息结束了」。
+    /// 只有在**确实存在**未闭合的休息时才写，正常启动不会留下多余记录。
+    ///
+    /// ## 结束时刻取的是「上界」，为什么可以接受
+    ///
+    /// 真实的结束时刻无从得知（那一刻应用已经死了，没人能记下来）。
+    /// 能拿到的证据只有：[`EventRepo::first_after`] —— 那条 started
+    /// **之后**最早出现的事件。它发生时应用一定已经重新活过来了，
+    /// 所以休息必然已经结束。这是一个**上界**，可能比真实结束稍晚，
+    /// 但它有界、有依据，而「永远悬空」是无限大的误差。
+    ///
+    /// ## 为什么必须扫全部历史，而不是只看最新一条
+    ///
+    /// 这里曾经写的是「最近一次 break.started 比最近一次 break.completed
+    /// 更晚 → 判定悬空」，只看了一头一尾。这个写法漏掉了一类真实情况：
+    ///
+    /// ```text
+    ///   18:45:17  break.started      ← 应用在这里被重启，永远没闭合
+    ///   19:04:53  break.started      ← 用户又休息了一次，这次正常
+    ///   19:09:52  break.completed
+    /// ```
+    ///
+    /// 最新一条 started（19:04:53）确实早于最新一条 completed（19:09:52），
+    /// 于是判定「没有悬空」——**而 18:45:17 那条就这么留在了库里**。
+    /// 它还会一直留着：后续每次启动都只看最新一对，历史伤疤再也不会被看到。
+    ///
+    /// 真实数据库里就存在这样一条（2026-09-20 18:45:17），是这个测试
+    /// 之外、靠人工查库才发现的。所以现在改成把整部历史配对一遍：
+    /// 遇到「上一条还没收尾，下一条就开始了」，上一条就是悬空的。
+    fn close_dangling_break(&mut self, now: Timestamp) -> Result<(), StateError> {
+        // ── 第一遍：把整部休息史配对，找出所有没结尾的 started ──
+        let mut open: Option<Timestamp> = None;
+        let mut dangling: Vec<Timestamp> = Vec::new();
+
+        for row in EventRepo::break_lifecycle(&self.db)? {
+            match row.kind {
+                BehaviorKind::BreakStarted => {
+                    // 上一次还没收尾就又开始了一次 —— 上一次是悬空的
+                    if let Some(started) = open.take() {
+                        dangling.push(started);
+                    }
+                    open = Some(row.occurred_at);
+                }
+                // 这两种都是「这次休息结束了」的收尾。
+                //
+                // 显式列出而不是用 `_ =>`：万一 `break_lifecycle` 以后
+                // 扩大了读取范围（比如加了 `break.snoozed`），新的类型
+                // 应该落进「什么都没匹配上」那个分支、保持 `open` 不动，
+                // 而不是被静默当成一次闭合 —— 后者会让真正悬空的那条
+                // 又被漏掉，正是这个函数要修的毛病。
+                BehaviorKind::BreakCompleted | BehaviorKind::BreakSkipped => open = None,
+                _ => {}
+            }
+        }
+        // 扫到最后还开着的那一条（被本次重启打断的那次休息）
+        if let Some(started) = open {
+            dangling.push(started);
+        }
+
+        if dangling.is_empty() {
+            return Ok(());
+        }
+
+        // ── 第二遍：为每条悬空的休息算结束时刻，然后统一写入 ──
+        //
+        // 先把所有时刻算完再写：`first_after` 查的是「之后最早的事件」，
+        // 如果我们边算边写，刚补进去的那条 completed 就可能被当成
+        // 「后面还有事件」的证据，把下一条的上界算错。
+        let closes: Vec<(Timestamp, Timestamp)> = dangling
+            .into_iter()
+            .map(|started| {
+                let ended_at = EventRepo::first_after(&self.db, started)?
+                    .unwrap_or(now)
+                    // 兜底：上界不可能晚于「现在」
+                    .min(now);
+                Ok((started, ended_at))
+            })
+            .collect::<Result<_, StateError>>()?;
+
+        for (started, ended_at) in closes {
+            crate::logging::info(&format!(
+                "发现未闭合的休息（开始于 {}），补记为完成（结束时刻取 {} 秒后的上界）",
+                started.as_millis(),
+                ended_at.millis_since(started).max(0) / 1000
+            ));
+            EventRepo::append(&self.db, BehaviorKind::BreakCompleted, "{}", ended_at)?;
+        }
+
+        Ok(())
     }
 
     /// 供测试使用：用内存数据库建一个干净的状态。
@@ -135,6 +256,7 @@ impl AppState {
             last_intervention_id: None,
             last_interruption_at: None,
             break_ends_at: None,
+            break_planned_seconds: None,
             snooze_until: None,
             paused: false,
         })
@@ -468,6 +590,8 @@ impl AppState {
 
         self.clock.handle(WorkInput::StartBreak, now);
         self.break_ends_at = Some(now.saturating_add_millis(duration_ms));
+        // 总时长和结束时刻一起定下来，整段休息里都不再变（进度环的分母）
+        self.break_planned_seconds = Some((duration_ms / 1000) as u32);
 
         EventRepo::append(&self.db, BehaviorKind::BreakStarted, "{}", now)?;
 
@@ -507,6 +631,7 @@ impl AppState {
             self.on_work_state_changed(change.from, change.to, now)?;
         }
         self.break_ends_at = None;
+        self.break_planned_seconds = None;
 
         EventRepo::append(&self.db, BehaviorKind::BreakCompleted, "{}", now)?;
 
@@ -573,6 +698,7 @@ impl AppState {
             self.on_work_state_changed(change.from, change.to, now)?;
         }
         self.break_ends_at = None;
+        self.break_planned_seconds = None;
         Ok(())
     }
 
@@ -648,6 +774,35 @@ impl AppState {
         let ends_at = self.break_ends_at?;
         let remaining = ends_at.millis_since(now).max(0) / 1000;
         Some(remaining as u32)
+    }
+
+    /// 这次休息计划的总时长（秒）；不在休息中时为 `None`。
+    ///
+    /// ## 为什么界面需要一个「另外的」数字
+    ///
+    /// 休息界面中间那个环要画「已经过去多少比例」，比例就得有分母。
+    /// 直觉上分母是「休息总时长」，但早期实现偷懒用了**剩余秒数**：
+    ///
+    /// ```text
+    ///   progress = 1 - remaining / remaining_of_last_snapshot
+    /// ```
+    ///
+    /// 剩余秒数每 10 秒（调度器的 tick 间隔）随新快照刷新一次，分母于是
+    /// 跟着分子一起变小，比例被反复拉回 0 —— 环每 10 秒倒退一次。
+    /// 又因为 CSS 上挂了 1 秒的过渡，倒退那一下比前进快 10 倍，
+    /// 看起来就是用户报的「**刚开始慢，然后快**」。
+    ///
+    /// 修法是让分母回到它本来就该是的东西：一个整段休息里恒定不变的数。
+    /// 它只在 `start_break` 那一刻确定，中途任何快照刷新都不会改动它，
+    /// 只有在休息真正结束时才被清掉。
+    ///
+    /// ## 为什么不做成「总时长 = 剩余 + 已过去」
+    ///
+    /// 那样算出来的值同样会随快照抖动（快照晚到几百毫秒就会差一秒），
+    /// 分母一抖，环就跟着抖 —— 毛病还在。所以这里是**存下来**，
+    /// 而不是**算出来**。
+    pub fn break_total_seconds(&self) -> Option<u32> {
+        self.break_planned_seconds
     }
 
     /// 取锁——给调度线程与命令层用的访问入口。
@@ -794,6 +949,204 @@ mod tests {
 
     fn state() -> AppState {
         AppState::in_memory(Box::new(MockPlatform::new())).expect("建立状态")
+    }
+
+    // ======================================================== 未闭合的休息
+
+    /// 回归测试：应用在休息途中重启，那条 `break.started` 必须被补上结束。
+    ///
+    /// ## 为什么这条重要
+    ///
+    /// 休息的结束时刻只在内存里，不落库。应用重启后内存状态清零，
+    /// 但 `break.started` 已经写进库了 —— 那条事件永远等不到它的
+    /// `break.completed`，于是下一次统计会把它和后来的时间连起来算。
+    ///
+    /// 真实数据库里出现过一次「休息 1475 秒」（设的是 300 秒），
+    /// 多出来的 19 分钟正是应用重启到下一次操作之间的空档。
+    #[test]
+    fn 未闭合的休息会在启动时被补记完成() {
+        let mut state = state();
+        let now = Timestamp::now();
+        let started_at = now.saturating_sub_millis(30 * MINUTE);
+
+        // 造出「重启前刚开始休息」的库状态：只有 break.started，没有结束
+        EventRepo::append(&state.db, BehaviorKind::BreakStarted, "{}", started_at).expect("写入");
+
+        state.close_dangling_break(now).expect("收尾");
+
+        let completed =
+            EventRepo::last_occurrence(&state.db, BehaviorKind::BreakCompleted).expect("查询");
+        assert!(
+            completed.is_some(),
+            "未闭合的休息应当被补记一条完成，否则统计永远悬空"
+        );
+    }
+
+    /// 已经正常结束的休息**不该**被再补一条完成事件。
+    ///
+    /// 这个用例防的是「每次启动都往库里塞一条 break.completed」——
+    /// 那会把「今天休息了几次」这类统计越算越多，
+    /// 而且每次重启都多一条，很难被发现。
+    #[test]
+    fn 已正常结束的休息不会被重复补记() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.start_break(now).expect("开始休息");
+        state
+            .finish_break(now.saturating_add_millis(5 * MINUTE))
+            .expect("结束休息");
+
+        let before = EventRepo::count_in_window(
+            &state.db,
+            BehaviorKind::BreakCompleted,
+            &tacet_storage::DateWindow::day_of(now, state.offset),
+        )
+        .expect("计数");
+
+        // 模拟一次重启后的收尾检查
+        state
+            .close_dangling_break(now.saturating_add_millis(10 * MINUTE))
+            .expect("收尾");
+
+        let after = EventRepo::count_in_window(
+            &state.db,
+            BehaviorKind::BreakCompleted,
+            &tacet_storage::DateWindow::day_of(now, state.offset),
+        )
+        .expect("计数");
+
+        assert_eq!(before, after, "已经闭合的休息不该被再次补记");
+    }
+
+    /// 跳过也算闭合，不该被补记。
+    #[test]
+    fn 跳过的休息不会被补记完成() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.start_break(now).expect("开始休息");
+        state
+            .skip_break(now.saturating_add_millis(MINUTE))
+            .expect("跳过");
+
+        let before = EventRepo::count_in_window(
+            &state.db,
+            BehaviorKind::BreakCompleted,
+            &tacet_storage::DateWindow::day_of(now, state.offset),
+        )
+        .expect("计数");
+
+        state
+            .close_dangling_break(now.saturating_add_millis(10 * MINUTE))
+            .expect("收尾");
+
+        let after = EventRepo::count_in_window(
+            &state.db,
+            BehaviorKind::BreakCompleted,
+            &tacet_storage::DateWindow::day_of(now, state.offset),
+        )
+        .expect("计数");
+
+        assert_eq!(before, after, "跳过已经是一次闭合，不该再补完成");
+    }
+
+    /// 全新库（从没休息过）不该产生任何记录。
+    #[test]
+    fn 全新的库不会被补记任何事件() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.close_dangling_break(now).expect("收尾");
+
+        let completed =
+            EventRepo::last_occurrence(&state.db, BehaviorKind::BreakCompleted).expect("查询");
+        assert!(
+            completed.is_none(),
+            "从没休息过的库不该凭空多出一条完成记录"
+        );
+    }
+
+    /// 回归测试：**历史**留下的未闭合休息也必须被补上，哪怕后面还有正常的休息。
+    ///
+    /// ## 这条测试守的是「只看最新一对」这个错误的写法
+    ///
+    /// 真实数据库里发生过这样一段（2026-09-20）：
+    ///
+    /// ```text
+    ///   18:45:17  break.started      ← 应用在这里被重启，永远没闭合
+    ///   19:04:53  break.started      ← 用户又休息了一次，这次正常
+    ///   19:09:52  break.completed
+    /// ```
+    ///
+    /// 早期实现是「最近一次 started 比最近一次 closed 更晚才算悬空」，
+    /// 于是它只看 19:04:53 与 19:09:52 —— 判定「没有悬空」，
+    /// 而 18:45:17 那条永远留在了库里。
+    ///
+    /// 更糟的是它**无法自愈**：后面每换一次休息，最新一对都是闭合的，
+    /// 那道旧伤疤再也不会被任何一次启动看到。
+    ///
+    /// 所以这条测试直接照搬真实数据的时间线。
+    #[test]
+    fn 历史遗留的未闭合休息也会被补记() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        // 第一段：18:45:17 开始，被重启打断（没有结尾）
+        let old_start = now.saturating_sub_millis(60 * MINUTE);
+        EventRepo::append(&state.db, BehaviorKind::BreakStarted, "{}", old_start).expect("写入");
+
+        // 用户重启后又做了一件别的事 —— 这是判断「上界」的依据
+        let evidence = old_start.saturating_add_millis(44_000);
+        EventRepo::append(&state.db, BehaviorKind::WorkStarted, "{}", evidence).expect("写入");
+
+        // 第二段：一次完整正常的休息（开始 + 完成）
+        let later_start = old_start.saturating_add_millis(20 * MINUTE);
+        EventRepo::append(&state.db, BehaviorKind::BreakStarted, "{}", later_start).expect("写入");
+        EventRepo::append(
+            &state.db,
+            BehaviorKind::BreakCompleted,
+            "{}",
+            later_start.saturating_add_millis(5 * MINUTE),
+        )
+        .expect("写入");
+
+        state.close_dangling_break(now).expect("收尾");
+
+        // 补齐之后，整部休息史里不该再有任何未闭合的 started。
+        //
+        // 这里按**时间**重排后再配对，而不是按 `break_lifecycle` 给的
+        // 写入顺序 —— 因为补记的那条 `completed` 的时间戳可能早于
+        // 后续事件（上界本来就落在两者之间），写入顺序会把它排到后面去。
+        // 而「统计口径」看的是发生时间，所以测试也要按时间验证。
+        let mut rows = EventRepo::break_lifecycle(&state.db).expect("读取");
+        rows.sort_by_key(|row| (row.occurred_at.as_millis(), row.id));
+
+        // 用一个「当前开着的那次休息」来配对：遇到 started 记下，
+        // 遇到 completed / skipped 清空。跑完之后还开着的才是未闭合。
+        let mut open: Option<Timestamp> = None;
+        for row in &rows {
+            match row.kind {
+                BehaviorKind::BreakStarted => open = Some(row.occurred_at),
+                BehaviorKind::BreakCompleted | BehaviorKind::BreakSkipped => open = None,
+                _ => {}
+            }
+        }
+        assert!(
+            open.is_none(),
+            "补记之后不该还有未闭合的休息，但这一条还开着：{open:?}"
+        );
+
+        // 补记的结束时刻应当是「之后最早那条事件」——44 秒，而不是现在（一小时）
+        let closes: Vec<i64> = rows
+            .iter()
+            .filter(|row| row.kind == BehaviorKind::BreakCompleted)
+            .map(|row| row.occurred_at.as_millis())
+            .collect();
+        assert!(
+            closes.contains(&evidence.as_millis()),
+            "结束时刻应当取「之后最早那条事件」作为上界（{evidence:?}），实际：{closes:?}"
+        );
     }
 
     #[test]
@@ -1265,6 +1618,110 @@ mod tests {
         let past = now.saturating_add_millis(301 * SECOND);
         state.tick(past).expect("tick");
         assert_eq!(state.work_state(), WorkState::Working, "过了时长就该结束");
+    }
+
+    /// 回归测试：进度环的分母（休息总时长）在整段休息里必须恒定。
+    ///
+    /// ## 这个 bug 是怎么被发现的
+    ///
+    /// 用户报「休息时外面那个圈刚开始慢，然后快」。
+    ///
+    /// 环画的是 `已过去 / 总共`，而前端把**剩余秒数**当成了分母 ——
+    /// 剩余每秒在减，分母跟着一起缩，比例于是被反复拉回 0：
+    ///
+    /// ```text
+    ///   第 0 秒   比例 0
+    ///   第 1~9 秒 比例 1/300 … 9/300（慢）
+    ///   第 10 秒  新快照到，分母变成 290 → 比例退回 0
+    ///   第 11 秒  从 1/290 重新爬（这一格比上一格大 3%）
+    /// ```
+    ///
+    /// 每 10 秒（调度器的 tick 间隔）重复一次，看上去就是「慢慢爬，
+    /// 然后突然跳快」。
+    ///
+    /// 这条测试守住修法的核心：`break_total_seconds` 从开始休息到
+    /// 结束之前**一个数都不许变**，而且它必须和一开始设置的时长一致。
+    #[test]
+    fn 休息总时长在整段休息里恒定不变() {
+        use tacet_core::time::SECOND;
+
+        let mut state = state();
+        let now = Timestamp::now();
+
+        // 没在休息时没有总时长
+        assert!(
+            state.break_total_seconds().is_none(),
+            "不在休息中时不该有总时长"
+        );
+
+        state.start_break(now).expect("开始休息");
+
+        let planned = state.break_total_seconds().expect("开始休息后应当有总时长");
+        assert_eq!(planned, 300, "默认休息时长是 5 分钟");
+
+        // 走完整段休息，每一步都核对分母没变
+        // （特别是 tick 之后 —— 快照正是在 tick 里生成的）
+        for i in 1..=29u32 {
+            let at = now.saturating_add_millis(i as i64 * 10 * SECOND);
+            state.tick(at).expect("tick");
+
+            assert_eq!(
+                state.break_total_seconds(),
+                Some(planned),
+                "第 {i} 次 tick（第 {} 秒）后总时长被改动了 —— \
+                 分母一变，进度环就会倒退重画",
+                i * 10
+            );
+        }
+
+        // 299 秒时仍在休息，分母依然不变
+        let almost = now.saturating_add_millis(299 * SECOND);
+        state.tick(almost).expect("tick");
+        assert_eq!(
+            state.break_total_seconds(),
+            Some(planned),
+            "休息即将结束时总时长仍不该变"
+        );
+
+        // 结束后才清空 —— 下一次休息是新的分母
+        let past = now.saturating_add_millis(301 * SECOND);
+        state.tick(past).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working, "该结束了");
+        assert!(
+            state.break_total_seconds().is_none(),
+            "休息结束后应当清空，否则下一次休息会沿用旧分母"
+        );
+    }
+
+    /// 回归测试：休息总时长与剩余秒数必须自洽。
+    ///
+    /// 这两个数是一对：`总 = 剩余 + 已过去`。分母一旦和倒计时对不上，
+    /// 环画出来的比例就是错的 —— 要么永远走不满，要么提前转完。
+    ///
+    /// 这里逐秒核对两者的关系，顺便钉死「剩余确实在随真实时间减少」
+    /// 这个前提（如果剩余本身不动，环当然也不动，那是另一种故障）。
+    #[test]
+    fn 休息总时长与剩余秒数自洽() {
+        use tacet_core::time::SECOND;
+
+        let mut state = state();
+        let now = Timestamp::now();
+        state.start_break(now).expect("开始休息");
+
+        let total = state.break_total_seconds().expect("总时长");
+
+        for elapsed in [0i64, 1, 30, 60, 150, 299] {
+            let at = now.saturating_add_millis(elapsed * SECOND);
+            let remaining = state.break_remaining_seconds(at).expect("剩余");
+
+            // 整秒对齐时，剩余 + 已过去 应当正好等于总时长
+            assert_eq!(
+                remaining + elapsed as u32,
+                total,
+                "第 {elapsed} 秒：剩余 {remaining} + 已过去 {elapsed} \
+                 应当等于总时长 {total}"
+            );
+        }
     }
 
     /// 回归测试：休息期间收到「用户离开」的观测，休息不该被打断。

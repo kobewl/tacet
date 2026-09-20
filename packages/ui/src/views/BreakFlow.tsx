@@ -265,9 +265,75 @@ export function BreakFlow() {
   }
 
   const snoozeOptions = [1, 3, 5];
-  const totalSeconds = snapshot.breakRemainingSeconds ?? 300;
+
+  /**
+   * 进度环的分母：这次休息**计划的总时长**，来自 Rust 侧的快照。
+   *
+   * ## 这里曾经算错过（用户报「刚开始慢，然后快」）
+   *
+   * 早期写的是：
+   *
+   * ```ts
+   *   const totalSeconds = snapshot.breakRemainingSeconds ?? 300;
+   *   const elapsedRatio = 1 - remaining / Math.max(1, totalSeconds);
+   * ```
+   *
+   * 看着像是「剩余 / 总共」，但 `remaining` 和 `totalSeconds` 其实是
+   * **同一个数**（只不过一个在本地每秒减，一个等着快照刷新）。
+   * 于是分母跟着分子一起缩小，比例被反复拉回 0：
+   *
+   * ```text
+   *   第  0 秒  比例 0                     环从 0 开始
+   *   第  9 秒  比例 9/300  = 3.0%          慢慢爬
+   *   第 10 秒  新快照到，分母变成 290
+   *            比例 = 1 - 290/290 = 0      整段倒退，1 秒内退完
+   *   第 19 秒  比例 9/290  = 3.1%          重新爬
+   * ```
+   *
+   * **每 10 秒重复一次**（调度器的 tick 间隔），而每一次窗口里
+   * 环要扫过的比例是 `10 / 剩余秒数` —— 这个数随时间**加速**：
+   *
+   * | 时间窗口      | 每 10 秒扫过 |
+   * |---------------|--------------|
+   * | 第   0~ 10 秒 |  3%          |
+   * | 第 200~210 秒 |  9%          |
+   * | 第 270~280 秒 | 30%          |
+   * | 第 290~300 秒 | 90%          |
+   *
+   * 这就是「刚开始慢，然后快」的全部来源：不是动画曲线的问题，
+   * 而是分母本身在缩水，导致越接近结束、环冲得越猛。
+   * 再加上 CSS 上挂的是 1 秒过渡，倒退那一下也会被画成一次飞快的滑动。
+   *
+   * ## 修法
+   *
+   * 分母换成 `breakTotalSeconds`：它在 `start_break` 那一刻确定，
+   * 整段休息里一个数都不变（Rust 侧有测试钉住这一点，见
+   * `休息总时长在整段休息里恒定不变`），于是每 10 秒扫过的比例
+   * 恒定是 3%，环平稳地线性走到 100%。
+   *
+   * `?? remaining ?? 300` 是兜底 —— 理论上快照一定带这个字段，
+   * 但如果哪天旧版本前端配上了新版本后端（或相反），
+   * 也不能让环除以 0 或直接报错。宁可退化成旧行为，也不要白屏。
+   */
+  const totalSeconds =
+    snapshot.breakTotalSeconds ?? snapshot.breakRemainingSeconds ?? 300;
+
+  /**
+   * 已经过去多少（0~1），进度环按它画弧。
+   *
+   * 末尾的钳制是给「比例」这个量本身定的规矩：它是个比例，就不该跑出
+   * [0, 1] —— 超出去的话 SVG 会照着 `strokeDashoffset` 画出一段**反向**
+   * 的弧，看起来像环在往回长。
+   *
+   * 正常路径下永远不会越界（剩余时间本来就落在 [0, 总时长] 里），
+   * 所以这是道保险，不是常规分支。留着它的理由和 `Math.max(1, ...)`
+   * 一样：万一哪天时间来源出了问题，环应该「画得不准」，而不是
+   * 「画成另一个东西」。
+   */
   const elapsedRatio =
-    remaining === null ? 0 : 1 - remaining / Math.max(1, totalSeconds);
+    remaining === null
+      ? 0
+      : Math.min(1, Math.max(0, 1 - remaining / Math.max(1, totalSeconds)));
 
   return (
     <div className="break-stage">

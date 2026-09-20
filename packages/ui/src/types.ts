@@ -124,6 +124,14 @@ export interface AppSnapshot {
   lastDecision: Decision | null;
   /** 当前正在休息时，剩余多少秒。 */
   breakRemainingSeconds: number | null;
+  /**
+   * 当前这次休息的**总**时长（秒），不在休息中时为 null。
+   *
+   * 和上面那个「剩余」是一对：剩余每秒都在变小，总时长整段休息恒定。
+   * 进度环的比例要用它当分母 —— 拿剩余当分母的话，分母会跟着分子
+   * 一起缩小，环会每隔几秒倒退一次。
+   */
+  breakTotalSeconds: number | null;
   /** 平台能力报告：哪些功能这台机器上不可用。 */
   capabilities: CapabilityInfo[];
 }

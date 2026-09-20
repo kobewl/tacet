@@ -346,8 +346,32 @@ pub fn start_break(app: AppHandle, state: State<'_, SharedState>) -> CmdResult<s
 /// 这些判断只存在于主窗口的状态机里。所以幕布只把「用户想收起来」
 /// 这个意图转发过去，由主窗口按当前阶段处理 —— 效果和用户直接在
 /// 主窗口按 Esc 完全一致。
+///
+/// ## 为什么必须记来源窗口
+///
+/// 这个命令有**两个完全不同的触发源**，而它们对排查的意义相反：
+///
+/// - `break-veil-*`：用户点了副屏那层幕布。幕布的**整个表面**都是
+///   可点击区域（这是「永不困住用户」的代价），所以它也是最容易被
+///   误触的一条路径 —— 手肘碰到触控板、在副屏上随手点一下，休息就结束了。
+/// - `break`：用户在主屏的休息界面上按了 Esc。
+///
+/// 用户报过「显示 5 分钟，过了一会就自动结束了」。查库只能看到
+/// `break.completed`，而它既可能是「按了 Esc」也可能是「点了幕布」，
+/// 甚至可能是「点了提前结束按钮」—— 三条路径的排查方向完全不同。
+/// 记下来源窗口，下次这条日志就能直接给出答案。
 #[tauri::command]
-pub fn dismiss_break(app: AppHandle) -> CmdResult<()> {
+pub fn dismiss_break(app: AppHandle, window: tauri::WebviewWindow) -> CmdResult<()> {
+    crate::logging::info(&format!(
+        "收到「收起休息界面」意图：来源窗口 = {}（{}）",
+        window.label(),
+        if window.label().starts_with("break-veil-") {
+            "副屏幕布被点击，这是最容易被误触的路径"
+        } else {
+            "主屏休息界面（Esc 键或界面上的按钮）"
+        }
+    ));
+
     windows::broadcast_dismiss(&app);
     Ok(())
 }
@@ -434,13 +458,45 @@ pub fn end_break(
 }
 
 /// 用户跳过这次休息。
+///
+/// ## 为什么这里必须记日志
+///
+/// 「这次休息怎么结束的」有三条路径，排查方向完全不同：
+///
+/// 1. **到点自动结束**（tick 分支，日志「休息到点，自动结束」）
+/// 2. **用户主动提前结束**（`end_break`，日志「休息提前结束」）
+/// 3. **用户跳过**（就是这里）
+///
+/// 用户报过「显示 5 分钟，但过了一会就自己结束了」。要判断那到底是
+/// 哪一条路径，唯一的依据就是日志 —— 而这条路径原本**一个字都不写**，
+/// 于是数据库里凭空多出一条 `break.skipped`，却无从知道是谁触发的。
+///
+/// 有了这行日志，「自己结束了」就能立刻定位：
+/// 日志里有「用户跳过」→ 是界面收到了点击（可能是误触）；
+/// 日志里什么都没有 → 那才真的是代码里的自动路径出了问题。
 #[tauri::command]
-pub fn skip_break(app: AppHandle, state: State<'_, SharedState>) -> CmdResult<serde_json::Value> {
+pub fn skip_break(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    window: tauri::WebviewWindow,
+) -> CmdResult<serde_json::Value> {
     let now = tacet_core::Timestamp::now();
+    let caller = window.label().to_string();
 
     let snapshot = {
         let mut guard = AppState::lock(&state);
+        let was_breaking = guard.work_state() == tacet_core::state::WorkState::Breaking;
         guard.skip_break(now)?;
+
+        crate::logging::info(&format!(
+            "skip_break 被调用：来源窗口 = {caller}，{}",
+            if was_breaking {
+                "当时正在休息中"
+            } else {
+                "当时还在提醒阶段"
+            }
+        ));
+
         scheduler::build_snapshot(&guard)
     };
 

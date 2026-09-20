@@ -221,6 +221,10 @@ pub fn build_snapshot(state: &AppState) -> Option<serde_json::Value> {
         "pendingIntent": pending_intent,
         "lastDecision": last_decision,
         "breakRemainingSeconds": state.break_remaining_seconds(now),
+        // 休息的**总**时长，与上面那个「剩余」成对出现。
+        // 界面用它当进度环的分母：剩余每秒在变，总时长整段不变，
+        // 分母跟着剩余变正是「环每 10 秒倒退一次」的原因。
+        "breakTotalSeconds": state.break_total_seconds(),
         "capabilities": capabilities,
     }))
 }
@@ -357,4 +361,110 @@ fn update_tray_title(app: &AppHandle, snapshot: &serde_json::Value) {
     };
 
     let _ = tray.set_title(Some(title));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tacet_platform::MockPlatform;
+
+    fn state() -> AppState {
+        AppState::in_memory(Box::new(MockPlatform::new())).expect("建立状态")
+    }
+
+    /// 回归测试：快照里的 `breakTotalSeconds` 必须真的送到界面上。
+    ///
+    /// ## 为什么需要这条
+    ///
+    /// 快照是用 `serde_json::json!` 手工拼的，键名是个**字符串字面量** ——
+    /// 拼错了编译器一声不吭。而前端拿不到这个字段时的表现是「退化成
+    /// 没有它」，正好退回到那个「环先慢后快」的旧行为上：
+    /// 应用照常能跑、测试照常全绿、界面照常显示，只有环在悄悄地抖。
+    ///
+    /// 这类「静默退化」是最难发现的一种故障，所以键名必须由测试钉住。
+    #[test]
+    fn 快照里带着休息总时长() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        // 不在休息中：字段存在，但是 null（界面据此知道没有休息在进行）。
+        // 「字段存在」和「值为 null」要分开断言 —— 只断言 null 的话，
+        // 键名拼错（整个键消失）也会让测试通过。
+        let idle = build_snapshot(&state).expect("快照");
+        assert!(
+            idle.get("breakTotalSeconds").is_some(),
+            "快照里必须有 breakTotalSeconds 这个键；\
+             键名写错会让前端永远拿不到值，进度环退化成「先慢后快」"
+        );
+        assert_eq!(
+            idle.get("breakTotalSeconds"),
+            Some(&serde_json::Value::Null),
+            "没在休息时 breakTotalSeconds 应当是 null"
+        );
+
+        state.start_break(now).expect("开始休息");
+
+        let snapshot = build_snapshot(&state).expect("快照");
+        assert_eq!(
+            snapshot.get("breakTotalSeconds").and_then(|v| v.as_u64()),
+            Some(300),
+            "休息中 breakTotalSeconds 必须是这次休息的总时长（默认 300 秒）"
+        );
+    }
+
+    /// 回归测试：休息进行中，快照里的**总时长与剩余是两个不同的数**。
+    ///
+    /// ## 这条测试守住的是什么
+    ///
+    /// 那个「环先慢后快」的 bug，根子上是前端把剩余秒数当成了分母 ——
+    /// 而它能这么写，是因为当时快照里**只有**剩余秒数这一个数，
+    /// 前端手上根本没有别的东西可用。
+    ///
+    /// 现在快照同时给出这两个数，它们必须满足：
+    ///
+    /// - **总时长恒等于设置值**（300）—— 它是进度环的分母，不能随时间变
+    /// - **剩余随着时间减少** —— 它是分子，本来就该在走
+    ///
+    /// 所以这条测试要让时间真的过去一段。`build_snapshot` 内部用的是
+    /// 真实时钟（它要算「距上次喝水多久」这类相对时间），没法用模拟时间
+    /// 直接推 —— 于是换一个方向：把休息的**起点**设在 3 分钟前，
+    /// 效果和「已经休息了 3 分钟」完全一样。
+    #[test]
+    fn 休息进行中总时长不变而剩余在减少() {
+        use tacet_core::time::MINUTE;
+
+        let mut state = state();
+        let now = Timestamp::now();
+
+        // 这次休息在 3 分钟前就开始了
+        state
+            .start_break(now.saturating_sub_millis(3 * MINUTE))
+            .expect("开始休息");
+
+        let snapshot = build_snapshot(&state).expect("快照");
+
+        assert_eq!(
+            snapshot.get("breakTotalSeconds").and_then(|v| v.as_u64()),
+            Some(300),
+            "已经休息了 3 分钟，总时长必须还是 300 —— \
+             它一旦跟着剩余一起缩水，进度环就会每隔几秒倒退重画"
+        );
+
+        let remaining = snapshot
+            .get("breakRemainingSeconds")
+            .and_then(|v| v.as_u64())
+            .expect("剩余时间");
+        assert!(
+            (117..=120).contains(&remaining),
+            "休息了 3 分钟，剩余应当在 120 秒附近，实际 {remaining}"
+        );
+
+        // 两个数确实不一样了 —— 这正是旧代码出错的地方：
+        // 那时前端手上只有 remaining，拿它当分母，比例被反复拉回 0。
+        assert_ne!(
+            snapshot.get("breakTotalSeconds"),
+            snapshot.get("breakRemainingSeconds"),
+            "总时长和剩余必须是两个不同的数，否则分母又会跟着分子一起变"
+        );
+    }
 }
