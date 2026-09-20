@@ -1,0 +1,399 @@
+/**
+ * 全局样式与基础组件类。
+ *
+ * 这里放的是「多个界面都要用」的东西：重置、面板底板、按钮、卡片。
+ * 单个界面专属的样式写在各自的 CSS 文件里。
+ */
+
+@import "./tokens.css";
+
+/* ============================================================ 重置 */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--text-primary);
+  /* 桌面应用不需要文本被选中（除了输入框和 Intent 文本） */
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* 面板窗口本身是透明的，毛玻璃由各界面自己画 */
+  background: transparent;
+  overflow: hidden;
+}
+
+/* 允许选中的地方（用户可能想复制统计数字或 Intent 文本） */
+.selectable,
+input,
+textarea {
+  user-select: text;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  /* 按钮的默认高亮在 macOS 上是蓝色的，与整体色调冲突 */
+  -webkit-tap-highlight-color: transparent;
+}
+
+input {
+  font: inherit;
+  color: inherit;
+}
+
+/* 焦点样式：键盘导航时必须可见（无障碍要求） */
+:focus-visible {
+  outline: 2px solid var(--accent-water);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* 去掉 macOS 上数字输入框的上下箭头 */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ============================================================ 面板底板 */
+
+/**
+ * 面板 —— 菜单栏下拉、设置页这种「一整块浮在桌面上」的容器。
+ *
+ * ## 毛玻璃由谁来画（这里踩过坑）
+ *
+ * 最初这里写的是 `backdrop-filter: blur(44px)`，以为它能模糊背后的桌面。
+ * **它不能。** Tauri 的透明窗口就是一个没有背景色的 WKWebView，
+ * `backdrop-filter` 能采样到的只有同一个网页内部画在它下层的内容 ——
+ * 窗口背后的桌面、别的应用窗口都不在网页的光栅化范围里。
+ *
+ * 所以「透不透」完全取决于**这个窗口背后有没有系统画的底**：
+ *
+ * | 窗口 | 背后有什么 | 页面该画多实 |
+ * | --- | --- | --- |
+ * | 主面板（菜单栏下拉） | macOS 原生材质（`popover`） | 很薄一层白，只调对比度 |
+ * | 设置页 / 今日记录 | **什么都没有**（透明窗口） | **必须自己画成不透明** |
+ * | 全屏休息 / 幕布 | 同上 | 自己画不透明渐变（见 `BreakFlow.css`） |
+ *
+ * ## 设置页为什么必须是实底（真实踩过的坑）
+ *
+ * 设置窗口没有配 `windowEffects`，也就是**没有原生材质**。早期它和主面板
+ * 共用 `--surface-base` 的 72% 白 —— 在主面板上这是「薄薄一层玻璃」，
+ * 因为在它下面还有一层系统材质；可在设置窗口上，72% 白背后就是**用户的
+ * 桌面**：终端里的代码、浏览器的标签页全都透进来，糊在设置项下面。
+ *
+ * 真实反馈是「画面有问题」：文字和背后的代码叠在一起，既不像玻璃也不像
+ * 界面。0.72 不够 —— 只要背后没有系统的底，页面就必须自己把地基建实。
+ *
+ * 所以这里给得干脆：**设置页 / 今日记录用不透明的近白渐变**。
+ * 代价是失去「透出桌面」的效果，换回来的是「无论用户背后开着什么、
+ * 用哪块显示器、什么缩放比，这一屏在每台机器上都长得一样且读得清」。
+ */
+.panel {
+  position: relative;
+  border-radius: var(--radius-2xl);
+  background: var(--surface-base);
+  box-shadow: var(--shadow-lg);
+  /* 高光边框：上亮下暗，模拟光从上方来 */
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  overflow: hidden;
+}
+
+/**
+ * 主面板（菜单栏下拉）的底比其它窗口更透。
+ *
+ * 原因：它是唯一一个**背后真有原生材质**的窗口（配置里的
+ * `windowEffects: { effects: ["popover"] }`）。那层材质本身已经提供了
+ * 模糊和系统级的白度，CSS 再叠太厚的白会让面板糊成一块白板、白白浪费材质。
+ *
+ * 注意这个 0.4 **不能**照搬到别的窗口：没有材质垫底时它就是 60% 透明。
+ */
+.panel-shell {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+/**
+ * 设置页 / 今日记录 —— 自己把地基画实。
+ *
+ * 这两个窗口在 `tauri.conf.json` 里**没有** `windowEffects`，也不该有：
+ * 它们是常规文档窗口（有标题栏、可缩放），用户会在上面停留、阅读、
+ * 拖动滑杆，页面底必须稳定，不能随背后的桌面变化。
+ *
+ * 用一点极淡的竖向渐变而不是纯白，是为了延续这套设计语言里
+ * 「上亮下暗」的光感；页内的卡片、分隔线仍然按原来的层级叠在上面。
+ * 窗口本身已在配置里关掉 `transparent`，所以这里画的就是最终底色。
+ *
+ * ## 为什么要把 `.panel` 的圆角去掉
+ *
+ * `.panel` 带 `border-radius: 20px` + `overflow: hidden`，那是给**透明窗口**
+ * 准备的 —— 透明的窗口四角能透出桌面，看起来像一扇圆角玻璃。
+ * 但常规窗口是**不透明**的：macOS 已经按自己的规则给窗口切了圆角，
+ * CSS 再切一次只会在四个角露出窗口自己的底色，形成一圈假边。
+ * 所以这里把圆角交还给系统。
+ */
+.settings-shell,
+.today-shell {
+  background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+  border-radius: 0;
+}
+
+/* 面板顶部的细高光 —— 让「玻璃」有厚度 */
+.panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.9) 20%,
+    rgba(255, 255, 255, 0.9) 80%,
+    transparent
+  );
+  pointer-events: none;
+}
+
+/* ============================================================ 分隔线 */
+
+.hair {
+  height: 1px;
+  background: var(--border-hair);
+  border: none;
+  margin: 0;
+}
+
+/* ============================================================ 按钮 */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  border-radius: var(--radius-md);
+  font-weight: 500;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
+  white-space: nowrap;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+/* 主按钮：浅色实底，不抢眼但足够清楚 */
+.btn-primary {
+  background: var(--text-primary);
+  color: #fff;
+  padding: 0 var(--space-6);
+  height: 34px;
+  font-size: var(--text-base);
+}
+
+.btn-primary:hover {
+  background: #1d2126;
+}
+
+/* 次要按钮：透明底 + 边框 */
+.btn-quiet {
+  background: rgba(11, 13, 16, 0.045);
+  color: var(--text-secondary);
+  padding: 0 var(--space-6);
+  height: 34px;
+  font-size: var(--text-base);
+}
+
+.btn-quiet:hover {
+  background: rgba(11, 13, 16, 0.075);
+  color: var(--text-primary);
+}
+
+/* 文字按钮：最轻的一档，用于「设置」「退出」这类低频入口 */
+.btn-ghost {
+  color: var(--text-tertiary);
+  padding: 0 var(--space-4);
+  height: 28px;
+  font-size: var(--text-sm);
+}
+
+.btn-ghost:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ============================================================ 卡片 */
+
+/**
+ * 状态卡 —— 四类健康需求各占一张。
+ *
+ * 卡片刻意做得很轻：透明底 + 一圈细边。它们是「环境信息」而不是
+ * 「待办事项」，不该在视觉上争夺注意力。
+ */
+.card {
+  position: relative;
+  border-radius: var(--radius-xl);
+  background: var(--surface-card);
+  border: 1px solid var(--border-soft);
+  padding: var(--space-6);
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.card-interactive {
+  cursor: pointer;
+}
+
+.card-interactive:hover {
+  background: var(--surface-raised);
+  border-color: var(--border-hair);
+}
+
+/* 需求越接近阈值，卡片左侧的提示条越明显 */
+.card-due::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: var(--space-5);
+  bottom: var(--space-5);
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent-neutral);
+  opacity: 0.5;
+}
+
+/* ============================================================ 图标底座 */
+
+/**
+ * tile —— 图标下面那块带色的小方块。
+ *
+ * 比「裸图标」更容易形成视觉节奏：四张卡的图标底座颜色不同，
+ * 于是用户扫一眼就能定位到想要的那张，不用读文字。
+ */
+.tile {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-md);
+  line-height: 1;
+}
+
+.tile-rest {
+  background: var(--accent-rest-soft);
+  color: var(--accent-rest);
+}
+.tile-hydration {
+  background: var(--accent-water-soft);
+  color: var(--accent-water);
+}
+.tile-movement {
+  background: var(--accent-move-soft);
+  color: var(--accent-move);
+}
+.tile-eye {
+  background: var(--accent-eye-soft);
+  color: var(--accent-eye);
+}
+
+/* ============================================================ 文本 */
+
+/* 小号全大写标签，用于分区标题 */
+.kicker {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-kicker);
+  text-transform: uppercase;
+  color: var(--text-quaternary);
+  font-weight: 500;
+}
+
+.sub {
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+/* 数字用等宽，避免跳动 */
+.numeric {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* ============================================================ 进度条 */
+
+.bar {
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: rgba(11, 13, 16, 0.07);
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  transition: width var(--duration-slow) var(--ease-out);
+}
+
+.bar-fill-rest {
+  background: var(--accent-rest);
+}
+.bar-fill-hydration {
+  background: var(--accent-water);
+}
+.bar-fill-movement {
+  background: var(--accent-move);
+}
+.bar-fill-eye {
+  background: var(--accent-eye);
+}
+
+/* ============================================================ 滚动条 */
+
+/* 默认滚动条在浅色毛玻璃上太显眼，压细压淡 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(11, 13, 16, 0.12);
+  border-radius: var(--radius-full);
+  /* 用透明边框把滑块「瘦」下来 */
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(11, 13, 16, 0.22);
+  background-clip: content-box;
+}

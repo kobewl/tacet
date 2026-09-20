@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>02 菜单栏状态</title>
+<style>
+
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#F5F6F7;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",Arial,sans-serif;color:#1F2329;-webkit-font-smoothing:antialiased;font-size:14px}
+.page{position:relative;display:flex;flex-direction:column;gap:20px;padding:34px 44px 30px;overflow:hidden}
+.cap{display:flex;align-items:baseline;justify-content:space-between;flex:0 0 auto}
+.cap .t{font-size:14px;font-weight:600;color:#3C444C;letter-spacing:.01em}
+.cap .t em{font-style:normal;color:#A8AEB5;font-weight:600;margin-right:9px;font-variant-numeric:tabular-nums}
+.cap .v{font-size:11.5px;color:#A8AEB5;letter-spacing:.06em}
+.stage{flex:1;display:flex;align-items:center;justify-content:center;gap:26px}
+.stage-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px}
+.stage-bleed{flex:1;display:flex;align-items:center;justify-content:center;margin:-34px -44px -30px;border-radius:0}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+
+/* ---------- 通用细节 ---------- */
+.tile{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.tile svg{width:18px;height:18px}
+.t-teal{background:#E7F5F3;color:#2FA8A0}
+.t-water{background:#E9F2FB;color:#4A9FE0}
+.t-move{background:#FDF1E6;color:#DE8B41}
+.t-eye{background:#F0EDFB;color:#8B7BD8}
+.t-ok{background:#E9F6EF;color:#4CAF7D}
+.t-gray{background:#EFF1F3;color:#7C858E}
+.sub{font-size:12px;color:#98A0A8}
+.ok{color:#4CAF7D}
+
+/* 开关 */
+.sw{width:40px;height:24px;border-radius:12px;background:#D5DADF;position:relative;flex:0 0 auto;transition:.2s}
+.sw i{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.18);transition:.2s}
+.sw.on{background:#2FA8A0}
+.sw.on i{left:18px}
+
+/* 按钮 */
+.btn{border:none;border-radius:10px;font-size:13.5px;font-weight:500;font-family:inherit;cursor:default;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn-primary{background:#2FA8A0;color:#fff;height:38px;padding:0 18px;box-shadow:0 2px 8px rgba(47,168,160,.28)}
+.btn-ghost{background:#fff;color:#3C444C;height:38px;padding:0 16px;border:1px solid #E1E5E9}
+.btn-quiet{background:#F2F4F5;color:#5A636C;height:34px;padding:0 14px}
+.btn-plain{background:transparent;color:#8B939B;font-size:13px;height:30px;padding:0 6px}
+
+/* 窗口 / 面板 */
+.win{background:#fff;border-radius:16px;box-shadow:0 22px 50px rgba(16,24,32,.14),0 2px 8px rgba(16,24,32,.06);border:1px solid rgba(20,28,36,.05);overflow:hidden;position:relative}
+.tl{display:flex;gap:8px;align-items:center}
+.tl i{width:12px;height:12px;border-radius:50%;display:block}
+.tl .r{background:#FF5F57}.tl .y{background:#FEBC2E}.tl .g{background:#28C840}
+
+/* 分组卡片 */
+.group-title{font-size:12.5px;font-weight:600;color:#8B939B;margin:0 0 8px 4px}
+.card{background:#fff;border-radius:12px;border:1px solid #ECEEF0;overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:13px 16px;min-height:56px}
+.row + .row{border-top:1px solid #F0F2F4}
+.row .lab{font-size:13.5px;color:#262C33;flex:1}
+.row .ctl{display:flex;align-items:center;gap:14px}
+.pill{display:flex;align-items:center;gap:4px;background:#F4F6F7;border:1px solid #E7EAED;border-radius:8px;height:30px;padding:0 9px;font-size:13px;color:#3C444C;font-variant-numeric:tabular-nums}
+.pill span{color:#98A0A8;font-size:12px;margin-left:1px}
+
+
+</style>
+</head>
+<body>
+<div class="page" style="width:1120px;height:440px">
+
+  <div class="cap">
+    <div class="t"><em>02</em>菜单栏状态（Level 1 · 环境级提示）</div>
+    <div class="v">v0.1 Foundation</div>
+  </div>
+  <div class="stage">
+
+    <div style="display:flex;flex-direction:column;gap:13px">
+      <div style="width:1000px;height:30px;background:rgba(255,255,255,.86);backdrop-filter:blur(20px);border:1px solid rgba(20,28,36,.06);border-radius:8px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;box-shadow:0 2px 10px rgba(16,24,32,.05)">
+      <div style="display:flex;align-items:center;gap:14px;font-size:13px;color:#2A2F35">
+        <span style="display:flex;opacity:.85"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M11.1 8.4c0-1.6 1.3-2.4 1.4-2.4-.8-1.1-1.9-1.3-2.3-1.3-1-.1-1.9.6-2.4.6-.5 0-1.3-.6-2.1-.6-1.1 0-2.1.6-2.7 1.6-1.1 2-.3 5 .8 6.6.5.8 1.2 1.6 2 1.6.8 0 1.1-.5 2.1-.5s1.2.5 2.1.5c.9 0 1.4-.8 1.9-1.5.6-.9.9-1.7.9-1.8-.1 0-1.7-.7-1.7-2.4ZM9.6 3.6c.4-.5.7-1.2.6-1.9-.6 0-1.4.4-1.8.9-.4.5-.8 1.2-.7 1.9.7.1 1.4-.4 1.9-.9Z"/></svg></span>
+        <b style="font-weight:600">Finder</b>
+        <span style="color:#3C444C">文件</span><span style="color:#3C444C">编辑</span><span style="color:#3C444C">显示</span><span style="color:#3C444C">前往</span><span style="color:#3C444C">窗口</span><span style="color:#3C444C">帮助</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:13px;color:#3C444C">
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><rect x="2.2" y="4.4" width="13.6" height="9.2" rx="2.6" stroke="currentColor" stroke-width="1.4"/><path d="M6.6 9h4.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><path d="M2.5 6.6a9.6 9.6 0 0 1 13 0M5 9.3a6 6 0 0 1 8 0M7.4 11.9a2.4 2.4 0 0 1 3.2 0" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="9" cy="14" r=".9" fill="currentColor"/></svg></span>
+        <span style="display:flex;opacity:.8;width:24px"><svg viewBox="0 0 24 18" fill="none"><rect x="2.2" y="5.2" width="17" height="7.6" rx="2.4" stroke="currentColor" stroke-width="1.4" opacity=".55"/><rect x="3.9" y="6.9" width="12.4" height="4.2" rx="1.3" fill="currentColor"/><path d="M21 8.2v1.6c.9-.3 1.4-.5 1.4-.8s-.5-.5-1.4-.8Z" fill="currentColor" opacity=".55"/></svg></span>
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><circle cx="8.1" cy="8.1" r="4.9" stroke="currentColor" stroke-width="1.6"/><path d="M11.8 11.8 15.4 15.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+        <span style="width:1px;height:14px;background:#DFE3E6"></span>
+        <span style="display:flex;align-items:center;gap:6px;font-size:12.5px;"><span style="display:flex;width:15px;color:#8B939B"><svg viewBox="0 0 18 18" fill="none"><path d="M7.1 12.4V3.6l6.1-1.2v8.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="5.3" cy="12.7" r="1.9" stroke="currentColor" stroke-width="1.6"/><circle cx="11.4" cy="11" r="1.9" stroke="currentColor" stroke-width="1.6"/></svg></span></span>
+      </div>
+    </div><div class="sub" style="margin:7px 2px 0;font-size:11.5px">静默 —— 需求低或刚休息完，只保留一个安静的小图标</div>
+      <div style="width:1000px;height:30px;background:rgba(255,255,255,.86);backdrop-filter:blur(20px);border:1px solid rgba(20,28,36,.06);border-radius:8px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;box-shadow:0 2px 10px rgba(16,24,32,.05)">
+      <div style="display:flex;align-items:center;gap:14px;font-size:13px;color:#2A2F35">
+        <span style="display:flex;opacity:.85"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M11.1 8.4c0-1.6 1.3-2.4 1.4-2.4-.8-1.1-1.9-1.3-2.3-1.3-1-.1-1.9.6-2.4.6-.5 0-1.3-.6-2.1-.6-1.1 0-2.1.6-2.7 1.6-1.1 2-.3 5 .8 6.6.5.8 1.2 1.6 2 1.6.8 0 1.1-.5 2.1-.5s1.2.5 2.1.5c.9 0 1.4-.8 1.9-1.5.6-.9.9-1.7.9-1.8-.1 0-1.7-.7-1.7-2.4ZM9.6 3.6c.4-.5.7-1.2.6-1.9-.6 0-1.4.4-1.8.9-.4.5-.8 1.2-.7 1.9.7.1 1.4-.4 1.9-.9Z"/></svg></span>
+        <b style="font-weight:600">Finder</b>
+        <span style="color:#3C444C">文件</span><span style="color:#3C444C">编辑</span><span style="color:#3C444C">显示</span><span style="color:#3C444C">前往</span><span style="color:#3C444C">窗口</span><span style="color:#3C444C">帮助</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:13px;color:#3C444C">
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><rect x="2.2" y="4.4" width="13.6" height="9.2" rx="2.6" stroke="currentColor" stroke-width="1.4"/><path d="M6.6 9h4.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><path d="M2.5 6.6a9.6 9.6 0 0 1 13 0M5 9.3a6 6 0 0 1 8 0M7.4 11.9a2.4 2.4 0 0 1 3.2 0" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="9" cy="14" r=".9" fill="currentColor"/></svg></span>
+        <span style="display:flex;opacity:.8;width:24px"><svg viewBox="0 0 24 18" fill="none"><rect x="2.2" y="5.2" width="17" height="7.6" rx="2.4" stroke="currentColor" stroke-width="1.4" opacity=".55"/><rect x="3.9" y="6.9" width="12.4" height="4.2" rx="1.3" fill="currentColor"/><path d="M21 8.2v1.6c.9-.3 1.4-.5 1.4-.8s-.5-.5-1.4-.8Z" fill="currentColor" opacity=".55"/></svg></span>
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><circle cx="8.1" cy="8.1" r="4.9" stroke="currentColor" stroke-width="1.6"/><path d="M11.8 11.8 15.4 15.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+        <span style="width:1px;height:14px;background:#DFE3E6"></span>
+        <span style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:#2FA8A0"><span style="display:flex;width:15px;color:#2FA8A0"><svg viewBox="0 0 18 18" fill="none"><path d="M7.1 12.4V3.6l6.1-1.2v8.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="5.3" cy="12.7" r="1.9" stroke="currentColor" stroke-width="1.6"/><circle cx="11.4" cy="11" r="1.9" stroke="currentColor" stroke-width="1.6"/></svg></span><span class="num" style="font-weight:600">1h 32m</span></span>
+      </div>
+    </div><div class="sub" style="margin:7px 2px 0;font-size:11.5px">工作中 —— 显示连续工作计时，不发声、不弹窗</div>
+      <div style="width:1000px;height:30px;background:rgba(255,255,255,.86);backdrop-filter:blur(20px);border:1px solid rgba(20,28,36,.06);border-radius:8px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;box-shadow:0 2px 10px rgba(16,24,32,.05)">
+      <div style="display:flex;align-items:center;gap:14px;font-size:13px;color:#2A2F35">
+        <span style="display:flex;opacity:.85"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M11.1 8.4c0-1.6 1.3-2.4 1.4-2.4-.8-1.1-1.9-1.3-2.3-1.3-1-.1-1.9.6-2.4.6-.5 0-1.3-.6-2.1-.6-1.1 0-2.1.6-2.7 1.6-1.1 2-.3 5 .8 6.6.5.8 1.2 1.6 2 1.6.8 0 1.1-.5 2.1-.5s1.2.5 2.1.5c.9 0 1.4-.8 1.9-1.5.6-.9.9-1.7.9-1.8-.1 0-1.7-.7-1.7-2.4ZM9.6 3.6c.4-.5.7-1.2.6-1.9-.6 0-1.4.4-1.8.9-.4.5-.8 1.2-.7 1.9.7.1 1.4-.4 1.9-.9Z"/></svg></span>
+        <b style="font-weight:600">Finder</b>
+        <span style="color:#3C444C">文件</span><span style="color:#3C444C">编辑</span><span style="color:#3C444C">显示</span><span style="color:#3C444C">前往</span><span style="color:#3C444C">窗口</span><span style="color:#3C444C">帮助</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:13px;color:#3C444C">
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><rect x="2.2" y="4.4" width="13.6" height="9.2" rx="2.6" stroke="currentColor" stroke-width="1.4"/><path d="M6.6 9h4.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><path d="M2.5 6.6a9.6 9.6 0 0 1 13 0M5 9.3a6 6 0 0 1 8 0M7.4 11.9a2.4 2.4 0 0 1 3.2 0" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="9" cy="14" r=".9" fill="currentColor"/></svg></span>
+        <span style="display:flex;opacity:.8;width:24px"><svg viewBox="0 0 24 18" fill="none"><rect x="2.2" y="5.2" width="17" height="7.6" rx="2.4" stroke="currentColor" stroke-width="1.4" opacity=".55"/><rect x="3.9" y="6.9" width="12.4" height="4.2" rx="1.3" fill="currentColor"/><path d="M21 8.2v1.6c.9-.3 1.4-.5 1.4-.8s-.5-.5-1.4-.8Z" fill="currentColor" opacity=".55"/></svg></span>
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><circle cx="8.1" cy="8.1" r="4.9" stroke="currentColor" stroke-width="1.6"/><path d="M11.8 11.8 15.4 15.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+        <span style="width:1px;height:14px;background:#DFE3E6"></span>
+        <span style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:#4A9FE0"><span style="display:flex;width:15px;color:#4A9FE0"><svg viewBox="0 0 18 18" fill="none"><path d="M9 2.4c2.5 2.9 4.1 5.1 4.1 7a4.1 4.1 0 1 1-8.2 0c0-1.9 1.6-4.1 4.1-7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></span><span class="num" style="font-weight:600">12m</span></span>
+      </div>
+    </div><div class="sub" style="margin:7px 2px 0;font-size:11.5px">喝水临近 —— 用蓝色水滴把「快要提醒了」这件事提前放出来</div>
+      <div style="width:1000px;height:30px;background:rgba(255,255,255,.86);backdrop-filter:blur(20px);border:1px solid rgba(20,28,36,.06);border-radius:8px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;box-shadow:0 2px 10px rgba(16,24,32,.05)">
+      <div style="display:flex;align-items:center;gap:14px;font-size:13px;color:#2A2F35">
+        <span style="display:flex;opacity:.85"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M11.1 8.4c0-1.6 1.3-2.4 1.4-2.4-.8-1.1-1.9-1.3-2.3-1.3-1-.1-1.9.6-2.4.6-.5 0-1.3-.6-2.1-.6-1.1 0-2.1.6-2.7 1.6-1.1 2-.3 5 .8 6.6.5.8 1.2 1.6 2 1.6.8 0 1.1-.5 2.1-.5s1.2.5 2.1.5c.9 0 1.4-.8 1.9-1.5.6-.9.9-1.7.9-1.8-.1 0-1.7-.7-1.7-2.4ZM9.6 3.6c.4-.5.7-1.2.6-1.9-.6 0-1.4.4-1.8.9-.4.5-.8 1.2-.7 1.9.7.1 1.4-.4 1.9-.9Z"/></svg></span>
+        <b style="font-weight:600">Finder</b>
+        <span style="color:#3C444C">文件</span><span style="color:#3C444C">编辑</span><span style="color:#3C444C">显示</span><span style="color:#3C444C">前往</span><span style="color:#3C444C">窗口</span><span style="color:#3C444C">帮助</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:13px;color:#3C444C">
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><rect x="2.2" y="4.4" width="13.6" height="9.2" rx="2.6" stroke="currentColor" stroke-width="1.4"/><path d="M6.6 9h4.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><path d="M2.5 6.6a9.6 9.6 0 0 1 13 0M5 9.3a6 6 0 0 1 8 0M7.4 11.9a2.4 2.4 0 0 1 3.2 0" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="9" cy="14" r=".9" fill="currentColor"/></svg></span>
+        <span style="display:flex;opacity:.8;width:24px"><svg viewBox="0 0 24 18" fill="none"><rect x="2.2" y="5.2" width="17" height="7.6" rx="2.4" stroke="currentColor" stroke-width="1.4" opacity=".55"/><rect x="3.9" y="6.9" width="12.4" height="4.2" rx="1.3" fill="currentColor"/><path d="M21 8.2v1.6c.9-.3 1.4-.5 1.4-.8s-.5-.5-1.4-.8Z" fill="currentColor" opacity=".55"/></svg></span>
+        <span style="display:flex;opacity:.8"><svg viewBox="0 0 18 18" fill="none"><circle cx="8.1" cy="8.1" r="4.9" stroke="currentColor" stroke-width="1.6"/><path d="M11.8 11.8 15.4 15.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+        <span style="width:1px;height:14px;background:#DFE3E6"></span>
+        <span style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:#B9BFC5"><span style="display:flex;width:15px;color:#B9BFC5"><svg viewBox="0 0 18 18" fill="none"><path d="M7.1 12.4V3.6l6.1-1.2v8.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="5.3" cy="12.7" r="1.9" stroke="currentColor" stroke-width="1.6"/><circle cx="11.4" cy="11" r="1.9" stroke="currentColor" stroke-width="1.6"/></svg></span><span style="color:#B9BFC5">勿扰</span></span>
+      </div>
+    </div><div class="sub" style="margin:7px 2px 0;font-size:11.5px">勿扰 —— 用户主动开启，图标整体变淡，期间不做任何提示</div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

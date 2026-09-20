@@ -1,0 +1,14 @@
+[package]
+name = "tacet-platform"
+description = "Tacet 平台抽象层：七大能力 trait 定义、能力探测与测试替身"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+tacet-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true

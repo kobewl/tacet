@@ -1,0 +1,15 @@
+[package]
+name = "tacet-core"
+description = "Tacet 领域模型、工作状态机、决策引擎与事件总线（零平台依赖）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# 架构红线 1：tacet-core 是根，不允许依赖任何其他 tacet crate（架构文档 §3）。
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

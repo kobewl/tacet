@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>09 连续跳过 · 主动收手</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","PingFang SC","Helvetica Neue",Arial,sans-serif;
+  color:#0B0D10;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+  font-size:14px;letter-spacing:-.008em;
+}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+.scene{position:relative;width:100%;height:100%;overflow:hidden}
+
+/* 桌面底：柔和的多点渐变，作为毛玻璃的光源 */
+.desk{position:absolute;inset:-10%;
+  background:
+    radial-gradient(720px 600px at 13% 4%,   #D3E6EE 0%, rgba(211,230,238,0) 60%),
+    radial-gradient(660px 540px at 88% 12%,  #F2E3D6 0%, rgba(242,227,214,0) 62%),
+    radial-gradient(820px 700px at 76% 98%,  #CFE4EA 0%, rgba(207,228,234,0) 64%),
+    radial-gradient(600px 560px at 24% 90%,  #E4DFF2 0%, rgba(228,223,242,0) 66%),
+    radial-gradient(520px 420px at 54% 46%,  #EAF2F5 0%, rgba(234,242,245,0) 70%),
+    linear-gradient(158deg,#F2F6F8 0%,#E7EEF3 46%,#F1EDE8 100%);
+}
+/* 极细颗粒质感：用叠层半透明点阵近似，避免内联 data-URI（Ardot 转换器会误当外链资源下载）*/
+.grain{position:absolute;inset:0;opacity:.5;pointer-events:none;
+  background-image:
+    radial-gradient(rgba(11,13,16,.055) .6px, transparent .6px),
+    radial-gradient(rgba(11,13,16,.035) .5px, transparent .5px);
+  background-size:3px 3px, 4px 4px;
+  background-position:0 0, 1.5px 1.5px}
+
+/* 全屏白色毛玻璃：产品的核心视觉语言 */
+.veil{position:absolute;inset:0;background:rgba(255,255,255,.30);
+  -webkit-backdrop-filter:saturate(210%) blur(52px);backdrop-filter:saturate(210%) blur(52px)}
+/* 顶部来光 + 中心提亮，制造玻璃厚度 */
+.veil-2{position:absolute;inset:0;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.72) 0%, rgba(255,255,255,.10) 26%, rgba(255,255,255,0) 55%),
+    radial-gradient(1000px 680px at 50% 38%, rgba(255,255,255,.62) 0%, rgba(255,255,255,0) 72%)}
+/* 四周轻微压暗，让画面收边 */
+.veil-3{position:absolute;inset:0;background:radial-gradient(120% 100% at 50% 45%, rgba(255,255,255,0) 58%, rgba(20,32,44,.045) 100%)}
+
+/* 玻璃卡片 */
+.glass{background:rgba(255,255,255,.66);
+  -webkit-backdrop-filter:saturate(170%) blur(36px);backdrop-filter:saturate(170%) blur(36px);
+  border:1px solid rgba(255,255,255,.86);
+  box-shadow:0 28px 70px -24px rgba(15,23,32,.20), 0 4px 14px -6px rgba(15,23,32,.08), inset 0 1px 0 rgba(255,255,255,.9)}
+.glass-soft{background:rgba(255,255,255,.55);
+  -webkit-backdrop-filter:saturate(160%) blur(26px);backdrop-filter:saturate(160%) blur(26px);
+  border:1px solid rgba(255,255,255,.8);
+  box-shadow:0 18px 46px -22px rgba(15,23,32,.20), inset 0 1px 0 rgba(255,255,255,.85)}
+
+/* 发丝线 */
+.hair{height:1px;background:rgba(11,13,16,.07)}
+.hair-v{width:1px;background:rgba(11,13,16,.07)}
+
+/* 图标底座 */
+.tile{display:flex;align-items:center;justify-content:center;flex:0 0 auto;border-radius:10px}
+.tile svg{width:18px;height:18px}
+.t-rest{background:rgba(12,124,116,.10);color:#0C7C74}
+.t-water{background:rgba(28,110,176,.10);color:#1C6EB0}
+.t-move{background:rgba(178,110,36,.11);color:#A9681F}
+.t-eye{background:rgba(107,101,151,.11);color:#6B6597}
+.t-ok{background:rgba(52,133,92,.11);color:#34855C}
+
+/* 按钮 */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:none;font-family:inherit;
+  border-radius:999px;font-size:14px;font-weight:500;letter-spacing:-.005em;cursor:default;white-space:nowrap}
+.btn-primary{background:linear-gradient(180deg,#127F76 0%,#0C6E66 100%);color:#fff;
+  box-shadow:0 1px 0 rgba(255,255,255,.18) inset, 0 10px 24px -10px rgba(12,110,102,.55), 0 2px 6px -2px rgba(12,110,102,.3)}
+.btn-ghost{background:rgba(255,255,255,.62);color:#20262D;border:1px solid rgba(11,13,16,.09);
+  box-shadow:0 1px 2px rgba(15,23,32,.045), inset 0 1px 0 rgba(255,255,255,.9);
+  -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
+.btn-quiet{background:rgba(255,255,255,.5);color:#4B525A;border:1px solid rgba(11,13,16,.07)}
+.btn-text{background:transparent;color:#8C939B;font-size:13px}
+
+/* 标签 */
+.kicker{font-size:10.5px;font-weight:600;letter-spacing:.30em;color:#B9BFC6;text-transform:uppercase}
+.sub{font-size:12.5px;color:#8C939B;letter-spacing:-.004em}
+.ink2{color:#4B525A}
+
+/* 开关 */
+.sw{width:40px;height:23px;border-radius:999px;background:rgba(11,13,16,.14);position:relative;flex:0 0 auto}
+.sw i{position:absolute;top:2px;left:2px;width:19px;height:19px;border-radius:50%;background:#fff;
+  box-shadow:0 1px 3px rgba(15,23,32,.22), 0 0 0 .5px rgba(15,23,32,.04)}
+.sw.on{background:linear-gradient(180deg,#12867C,#0C6E66)}
+.sw.on i{left:19px}
+
+/* 顶栏（macOS 菜单栏） */
+.menubar{position:absolute;top:0;left:0;right:0;height:28px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 14px;background:rgba(255,255,255,.72);
+  -webkit-backdrop-filter:saturate(180%) blur(30px);backdrop-filter:saturate(180%) blur(30px);
+  border-bottom:1px solid rgba(11,13,16,.055);font-size:13px;color:#1E242B;z-index:5}
+.menubar .l{display:flex;align-items:center;gap:16px}
+.menubar .l b{font-weight:600}
+.menubar .r{display:flex;align-items:center;gap:14px;color:#2C333A}
+.menubar .r svg{width:17px;height:17px;opacity:.82}
+
+/* 行 */
+.row{display:flex;align-items:center;gap:12px;padding:13px 16px;min-height:56px}
+.row .lab{flex:1;font-size:13.5px;color:#20262D;letter-spacing:-.006em}
+.ctl{display:flex;align-items:center;gap:14px}
+.pill{display:flex;align-items:center;gap:5px;height:30px;padding:0 10px;border-radius:9px;
+  background:rgba(255,255,255,.7);border:1px solid rgba(11,13,16,.08);
+  font-size:13px;color:#20262D;box-shadow:inset 0 1px 0 rgba(255,255,255,.9)}
+.pill span{font-size:11.5px;color:#8C939B}
+
+/* ---------------------------------------------------------------
+   两个环，各司其职，互不干扰：
+
+   1) 进度环 .prog —— 信息型。外圈随剩余时间匀速收缩，只动 arc 长度，
+      位置和缩放都不动。这是「还剩多久」的唯一视觉表达。
+   2) 呼吸脉动 .pulse —— 引导型。内圈做 10 秒一周期的极小幅缩放
+      （4 秒吸 / 6 秒呼 ＝ 6 次/分）。这是本版唯一的持续动效。
+
+   为什么不做「动态背景」：屏幕运动本身对眼睛没有益处（AAO 明确列出
+   数字眼疲劳的成因是眨眼减少、干燥、眩光、亮度失配、姿势，不含画面运动），
+   而后台运动反而会自动捕获周边视觉注意力 —— 对一个主张「不抢注意力」的
+   产品是反向的，且可能诱发前庭不适（WCAG 2.3.3）。
+   真正有生理依据的是「慢呼吸」与「看远处」，所以动效服务于这两件事。
+   --------------------------------------------------------------- */
+.ring{position:absolute;display:flex;align-items:center;justify-content:center}
+.ring svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+
+/* 进度环：只过渡 arc 长度，不参与缩放 */
+.prog{transition:stroke-dashoffset 1s linear}
+
+/* 呼吸脉动：独立图层，10 秒一个周期（4 秒吸 / 6 秒呼 ＝ 6 次/分）。
+   幅度 5%：上一版用 3.8%，实际在 27 寸屏上几乎看不出来，起不到引导作用；
+   5% 是「余光能明确跟上、但不会觉得画面在晃」的平衡点。 */
+.pulse{transform-origin:50% 50%;animation:breathe 10s cubic-bezier(.42,0,.58,1) infinite}
+@keyframes breathe{
+  0%  {transform:scale(1);   opacity:.45}
+  40% {transform:scale(1.05);opacity:1}
+  100%{transform:scale(1);   opacity:.45}
+}
+
+/* 倒计时：整串更新，不做逐位拆分。
+   原因：Ardot 的 HTML 转换器会在页面加载数秒后抓取 DOM，若数字被拆成
+   外层文本 + 内层 <span>（逐位滚动那种写法），它只会读到外层文本节点，
+   导入的原型就会出现「04:2」这样缺一位的情况。
+   改成一整个文本节点后，任何时刻被抓到的都是完整可读的数值。
+   高级感由「秒数做极轻的呼吸式明暗 + 整块极小幅位移」来体现。*/
+.cd{transition:opacity .38s ease}
+.cd.tick{animation:cdPulse .5s cubic-bezier(.22,.61,.36,1)}
+@keyframes cdPulse{
+  0%  {opacity:.62; transform:translateY(.045em)}
+  100%{opacity:1;   transform:translateY(0)}
+}
+
+/* ---------------------------------------------------------------
+   真实输入态（03 屏）：
+   原型里的输入框如果只是个静态方块，评审时没法判断「敲字是不是舒服」。
+   所以这里做了三件在真机上才看得出来的事：
+   1) 真光标 —— 用 1px 竖线 + steps 动画做闪烁，节奏与 macOS 一致（约 1s）；
+      用 steps 而非 ease，因为系统光标是硬切换，不是渐隐。
+   2) 聚焦环呼吸 —— 极慢的 4 秒明暗变化，暗示「这里在等你说话」，
+      不抢戏但让静止页面有生命感。
+   3) 已输入文字 + 字符计数 + 清除按钮的完整状态。
+   --------------------------------------------------------------- */
+.field{position:relative;display:flex;align-items:center;gap:12px;
+  padding:15px 16px;border-radius:13px;background:rgba(255,255,255,.82);
+  border:1px solid rgba(12,110,102,.34);
+  box-shadow:0 0 0 4px rgba(12,110,102,.10), inset 0 1px 0 rgba(255,255,255,.95);
+  animation:ringBreath 4.2s ease-in-out infinite}
+@keyframes ringBreath{
+  0%,100%{box-shadow:0 0 0 4px rgba(12,110,102,.10), inset 0 1px 0 rgba(255,255,255,.95)}
+  50%    {box-shadow:0 0 0 6px rgba(12,110,102,.055), inset 0 1px 0 rgba(255,255,255,.95)}
+}
+.caret{display:inline-block;width:1.5px;height:1.05em;background:#0C6E66;vertical-align:-.18em;
+  margin-left:1px;animation:blink 1.06s steps(1,end) infinite}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+.field-clear{display:flex;align-items:center;justify-content:center;width:16px;height:16px;
+  border-radius:50%;background:rgba(11,13,16,.16);color:#fff;flex:0 0 auto}
+
+/* 快捷键提示（03 屏用）：让「怎么提交」这件事可见，不用猜 */
+.kbd{display:inline-flex;align-items:center;justify-content:center;min-width:19px;height:19px;
+  padding:0 5px;border-radius:5px;background:rgba(255,255,255,.72);
+  border:1px solid rgba(11,13,16,.10);box-shadow:0 1px 0 rgba(11,13,16,.05);
+  font-size:10.5px;color:#8C939B;letter-spacing:.02em}
+
+/* 鸡汤：休息时的一个「可看可不看」，字号与对比度都压到最低 */
+.quote{width:460px;text-align:center;min-height:44px}
+.quote-t{font-size:13.5px;line-height:1.66;color:#6B737B;letter-spacing:.004em;
+  transition:opacity .5s ease}
+.quote-f{font-size:11.5px;color:#AEB5BC;margin-top:9px;letter-spacing:.02em;
+  transition:opacity .5s ease}
+.quote-f:empty{display:none}
+.quote.fade .quote-t,.quote.fade .quote-f{opacity:0}
+
+/* 尊重系统「减少动态效果」：动效全部关闭（WCAG 2.3.3） */
+@media (prefers-reduced-motion: reduce){
+  .pulse{animation:none;opacity:.6}
+  .cd,.cd.tick{animation:none;transition:none}
+  .prog{transition:none}
+  .quote-t,.quote-f{transition:none}
+  .caret{animation:none}
+  .field{animation:none}
+}
+</style>
+</head>
+<body>
+<div style="width:1440px;height:900px"><div class="scene" style="width:1440px;height:900px">
+  <div class="desk"></div><div class="grain"></div>
+  
+  <div class="veil"></div><div class="veil-2"></div><div class="veil-3"></div>
+  <div style="position:absolute;inset:0">
+  <!-- 刻意留大片空白 —— 这一屏要传达的是「安静」，用密度去填满会适得其反。 -->
+  <div style="position:absolute;left:96px;top:208px;width:520px">
+    <div class="kicker" style="font-size:10px;letter-spacing:.26em;color:#AEB5BC;margin-bottom:20px">原则 10 · 不惩罚</div>
+    <div style="font-size:27px;font-weight:600;letter-spacing:-.02em;color:#0B0D10;line-height:1.42;margin-bottom:16px">
+      连续跳过三次<br>它主动收手
+    </div>
+    <div class="sub" style="font-size:13.5px;line-height:1.78;color:#8C939B">
+      跳过是用户的正当权利，不是需要被纠正的行为。<br>
+      所以 Tacet 的回应是退开一步，而不是加强提醒。
+    </div>
+  </div>
+
+  <div style="position:absolute;left:96px;top:496px;width:520px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
+      <span class="kicker" style="font-size:10px;letter-spacing:.24em;color:#B9BFC6">收手期间，它不会</span>
+      <span class="hair" style="flex:1;margin-left:12px"></span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:15px"><div style="display:flex;align-items:flex-start;gap:11px">
+        <span style="display:flex;width:15px;height:15px;margin-top:2px;color:#8FA6A2;flex:0 0 auto"><svg viewBox="0 0 20 20" width="16" height="16" fill="none" ><path d="M4.2 10.4 8 14.2l7.8-8.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        <div style="display:flex;align-items:baseline;gap:14px;line-height:1.5">
+          <span style="font-size:13px;color:#3A424A;font-weight:500;flex:0 0 auto;min-width:54px">不扣分</span>
+          <span class="sub" style="font-size:12.5px">没有健康分、没有连续天数，跳过不产生任何记录</span>
+        </div>
+      </div><div style="display:flex;align-items:flex-start;gap:11px">
+        <span style="display:flex;width:15px;height:15px;margin-top:2px;color:#8FA6A2;flex:0 0 auto"><svg viewBox="0 0 20 20" width="16" height="16" fill="none" ><path d="M4.2 10.4 8 14.2l7.8-8.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        <div style="display:flex;align-items:baseline;gap:14px;line-height:1.5">
+          <span style="font-size:13px;color:#3A424A;font-weight:500;flex:0 0 auto;min-width:54px">不降权重</span>
+          <span class="sub" style="font-size:12.5px">下次该提醒还是照常提醒，不因为跳过而变更间隔</span>
+        </div>
+      </div><div style="display:flex;align-items:flex-start;gap:11px">
+        <span style="display:flex;width:15px;height:15px;margin-top:2px;color:#8FA6A2;flex:0 0 auto"><svg viewBox="0 0 20 20" width="16" height="16" fill="none" ><path d="M4.2 10.4 8 14.2l7.8-8.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        <div style="display:flex;align-items:baseline;gap:14px;line-height:1.5">
+          <span style="font-size:13px;color:#3A424A;font-weight:500;flex:0 0 auto;min-width:54px">不追问</span>
+          <span class="sub" style="font-size:12.5px">不会问你「为什么又跳过」，也不做跳过的原因归因</span>
+        </div>
+      </div></div>
+  </div>
+
+  <div style="position:absolute;left:96px;top:722px;width:520px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:13px">
+      <span class="kicker" style="font-size:10px;letter-spacing:.22em;color:#C8CED4">记录仅用于决定何时收手</span>
+      <span class="hair" style="flex:1;margin-left:12px"></span>
+    </div>
+    <div class="sub" style="font-size:12px;line-height:1.7;color:#AEB5BC">
+      跳过 3 次 · 分别发生在工作 62 / 78 / 95 分钟时 · 不进入任何统计
+    </div>
+  </div>
+
+  <div style="position:absolute;top:176px;right:96px;width:410px">
+    <div class="sub" style="font-size:11px;letter-spacing:.06em;color:#B9BFC6;margin-bottom:11px;text-align:right">收手通知 · 整个收手期只发这一次</div>
+    <div class="glass" style="width:430px;border-radius:20px;padding:16px 17px 15px">
+        <div style="display:flex;align-items:center;gap:11px;margin-bottom:12px">
+          <div class="tile t-rest" style="width:31px;height:31px;border-radius:9px"><svg viewBox="0 0 20 20" width="16" height="16" fill="none" ><path d="M10 3.2v13.6M4.4 6.6l11.2 6.8M15.6 6.6 4.4 13.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></div>
+          <div style="font-size:12.5px;font-weight:600;color:#5A626B;letter-spacing:.01em">Tacet</div>
+          <div style="flex:1"></div>
+          <div class="sub" style="font-size:11.5px">现在</div>
+        </div>
+        <div style="font-size:15px;font-weight:600;letter-spacing:-.012em;color:#0B0D10">接下来 2 小时不再提醒休息</div>
+        <div style="font-size:13.5px;color:#5A626B;line-height:1.55;margin-top:5px;margin-bottom:14px">
+          你连着跳过了 3 次，我先不打扰了。<br>忙完随时可以手动开始。
+        </div>
+        <div style="display:flex;gap:9px">
+          <button class="btn btn-quiet" style="flex:1;height:34px;font-size:13.5px;border-radius:10px">知道了</button>
+          <button class="btn btn-quiet" style="flex:1;height:34px;font-size:13.5px;border-radius:10px">恢复提醒</button>
+        </div>
+      </div>
+    <div class="sub" style="font-size:11.5px;margin-top:15px;color:#AEB5BC;line-height:1.72;text-align:right">
+      为什么不弹全屏：你已经连跳三次，说明此刻有更要紧的事。<br>
+      用一个打扰去承诺不再打扰，是自相矛盾的。
+    </div>
+  </div></div>
+</div></div>
+
+</body>
+</html>

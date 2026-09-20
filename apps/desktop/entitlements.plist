@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Tacet 的 macOS 权限声明。
+
+  ## 这份清单是产品隐私承诺的技术表达
+
+  平台策略 §4.4 列出了 Tacet 明确的隐私底线：不使用辅助功能、
+  不使用屏幕录制、不录音。这份 plist 里**没有任何一项**这类权限 ——
+  这不是疏忽，而是设计：
+
+  能力                所需权限
+  空闲检测            无（CoreGraphics 公开 API）
+  前台应用识别        无（NSWorkspace 公开 API）
+  全屏检测            无
+  系统通知            运行时授权（用户首次收到通知时确认）
+  开机自启            无（SMAppService）
+
+  注意：这份注释里不能出现两个连续的减号（连字符），这是 XML 规范
+  的硬性规定，而 Apple 的签名工具 AMFI 严格遵守（plutil 比较宽容，
+  所以本地检查发现不了）。曾经用 Markdown 表格的分隔线写过一版，
+  结果本地构建一直成功、一签名就报 AMFIUnserializeXML 语法错误。
+
+  换句话说：装上 Tacet 之后，用户不需要去系统设置里开任何权限。
+  这对一个健康工具来说很重要 —— 用户不该为了被提醒休息而交出系统控制权。
+
+  ## 关于 hardened runtime
+
+  `com.apple.security.cs.allow-jit` 是给 WebKit（Tauri 的 WebView）用的。
+  它**只允许即时编译**，不等于「可以执行任意代码」—— 这是所有基于
+  WebView 的 macOS 应用的标配（包括 Safari 自己）。
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>

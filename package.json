@@ -1,0 +1,20 @@
+{
+  "name": "tacet",
+  "private": true,
+  "type": "module",
+  "description": "Tacet —— 知道什么时候该开口，也知道什么时候该安静",
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "dev": "pnpm --filter @tacet/ui dev",
+    "build:ui": "pnpm --filter @tacet/ui build",
+    "lint": "pnpm --filter @tacet/ui lint",
+    "typecheck": "pnpm --filter @tacet/ui typecheck",
+    "tauri": "tauri",
+    "app:build": "tauri build --bundles app",
+    "app:dev": "tauri dev",
+    "icons:tray": "python3 apps/desktop/icons/generate_tray_icons.py"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.0"
+  }
+}

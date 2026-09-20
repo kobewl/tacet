@@ -1,0 +1,103 @@
+/**
+ * 幕布的样式。
+ *
+ * ## 视觉目标：安静、无信息、不诱人停留
+ *
+ * 它和主屏的休息界面是同一套视觉语言（同一组柔和的渐变光源），
+ * 但有两点不同：
+ *
+ * 1. **没有卡片、没有按钮、没有清单** —— 副屏上不该有任何值得研究的东西。
+ *    用户扫一眼知道「在休息、还剩多久」就够了，然后应该离开。
+ * 2. **中心内容更小** —— 主屏才是这次休息的「主场」，副屏是衬托。
+ *    两块屏都做得一样满，会让人不知道该看哪个。
+ *
+ * 关于为什么用自绘渐变而不是 `backdrop-filter`：见 `BreakFlow.css`
+ * 开头那段说明 —— 透明窗口上那个属性是假的，这里踩过一次坑。
+ */
+
+.break-veil {
+  width: 100vw;
+  height: 100vh;
+  position: relative;
+  overflow: hidden;
+
+  /* 与主屏同一组光源，色相偏淡一档：副屏是背景音，不该抢主屏 */
+  background:
+    radial-gradient(
+      760px 620px at 12% 2%,
+      rgba(216, 233, 240, 0.95) 0%,
+      rgba(216, 233, 240, 0) 62%
+    ),
+    radial-gradient(
+      680px 560px at 88% 10%,
+      rgba(245, 233, 222, 0.9) 0%,
+      rgba(245, 233, 222, 0) 64%
+    ),
+    radial-gradient(
+      840px 720px at 78% 100%,
+      rgba(213, 231, 237, 0.95) 0%,
+      rgba(213, 231, 237, 0) 66%
+    ),
+    linear-gradient(158deg, #fcfdfe 0%, #f5f8fa 48%, #fbf9f6 100%);
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  /* 整块都是可点的出口，所以给出正确的手势反馈 */
+  cursor: pointer;
+  /* 键盘聚焦时不要默认的蓝色描边 —— 这个界面自己决定怎么表达焦点 */
+  outline: none;
+  user-select: none;
+}
+
+.veil-content {
+  text-align: center;
+}
+
+.veil-kicker {
+  margin-bottom: 18px;
+}
+
+/**
+ * 副屏的倒计时。
+ *
+ * 比主屏的 68px 小一档。两块屏放同样大的数字会让视线没有主次，
+ * 而且副屏的职责只是「让你知道还有多久」，不是「让你盯着看」。
+ */
+.veil-count {
+  font-size: 54px;
+  font-weight: 200;
+  letter-spacing: -0.03em;
+  color: var(--accent-rest);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+/** 还没开始休息时，用一句话代替倒计时。 */
+.veil-title {
+  font-size: 30px;
+  font-weight: 300;
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-secondary);
+  line-height: 1;
+}
+
+.veil-hint {
+  margin: 28px 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-quaternary);
+  letter-spacing: 0.01em;
+}
+
+/** 角落的键盘出口提示，与主窗口保持一致的极轻处理。 */
+.veil-esc-hint {
+  position: absolute;
+  right: 28px;
+  bottom: 24px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-quaternary);
+  opacity: 0.55;
+  pointer-events: none;
+}

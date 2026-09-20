@@ -1,0 +1,19 @@
+[package]
+name = "tacet-storage"
+description = "Tacet 持久化层：SQLite schema、版本化迁移与领域仓储"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+tacet-core.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

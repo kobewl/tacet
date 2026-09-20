@@ -1,0 +1,20 @@
+# pnpm 工作区声明。
+#
+# ## 为什么需要这个文件
+#
+# 它让 `pnpm --filter @tacet/ui build` 能在**任何子目录**下工作：
+# pnpm 会向上查找这个文件来确定工作区根，然后按包名定位目标。
+#
+# 这一点对本项目是必要的 —— Tauri 的 `beforeBuildCommand` 并不是从
+# `apps/desktop/` 执行的，而是在 `apps/` 下执行（这是 Tauri 2 解析
+# 「项目根」的结果）。如果命令里写相对路径 `../../packages/ui`，
+# 就会解析到错误的位置。
+#
+# 用包名（`@tacet/ui`）而不是路径，就完全绕开了 cwd 这个不确定因素。
+packages:
+  - "packages/*"
+  # apps/* 里只有 apps/desktop 一个（Tauri 壳）。
+  # 把它纳入工作区，是为了让根目录的 `pnpm app:build` 之类的脚本
+  # 能统一管理，也避免出现「apps/desktop/node_modules 是一个
+  # 独立安装的孤儿目录」这种混乱。
+  - "apps/*"

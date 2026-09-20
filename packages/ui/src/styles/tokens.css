@@ -1,0 +1,179 @@
+/**
+ * 设计令牌 —— 界面的「物理常数」。
+ *
+ * 这些值来自 `docs/design/prototype-v0.1/` 里那 11 屏原型。
+ * 原型是用 Python 生成 HTML 的，这里把它们固化成 CSS 变量，
+ * 好处是改一处就全局生效，而且「哪些值是设计决定」变得一目了然。
+ *
+ * ## 三条设计原则（都体现在下面的取值里）
+ *
+ * 1. **安静是默认状态**：大面积的灰白、低对比的边框、克制的留白。
+ *    界面不出现「系统在盯着你」的压迫感。
+ * 2. **主色是水青系冷色**：取自「喝水 / 放松」的语义，
+ *    不用红色系 —— 那些颜色天然带有警报意味，与「不惩罚」的产品原则冲突。
+ * 3. **毛玻璃交给系统画**：`backdrop-filter` 在透明窗口上采不到桌面，
+ *    真正的模糊来自 macOS 的原生材质（见文件末尾的说明）。
+ */
+
+:root {
+  /* -------------------------------------------------- 色彩：文字 */
+  --text-primary: #0b0d10;
+  --text-secondary: #5a626b;
+  --text-tertiary: #8a929a;
+  --text-quaternary: #aeb5bc;
+  --text-faint: #b9bfc6;
+
+  /* -------------------------------------------------- 色彩：背景 */
+  /* 半透明白：窗口自己撑起对比度时用的底（设置页、今日记录）。
+     主面板更薄，因为它背后有 macOS 原生材质提供白度 —— 见 `.panel-shell`。 */
+  --surface-base: rgba(255, 255, 255, 0.72);
+  --surface-raised: rgba(255, 255, 255, 0.86);
+  --surface-sunken: rgba(246, 248, 248, 0.6);
+  /* 卡片上再叠一层的效果（比底色更实一点，用于需要突出的卡） */
+  --surface-card: rgba(255, 255, 255, 0.55);
+  --surface-hover: rgba(11, 13, 16, 0.04);
+  --surface-active: rgba(11, 13, 16, 0.07);
+
+  /* -------------------------------------------------- 色彩：功能 */
+  /* 品牌青 —— 取自「休息 / 放松」的语义，也是菜单栏图标的颜色。
+     整套配色里最深的那个，用于最强的强调（连续工作时长、品牌标识）。 */
+  --brand: #0c6e66;
+  --brand-soft: rgba(12, 110, 102, 0.1);
+
+  /* 休息：青灰绿 —— 「离开屏幕，看看远处」 */
+  --accent-rest: #6f8d88;
+  --accent-rest-soft: rgba(111, 141, 136, 0.12);
+  /* 喝水：水青 */
+  --accent-water: #4a86a8;
+  --accent-water-soft: rgba(74, 134, 168, 0.12);
+  /* 活动：暖一点的青绿 */
+  --accent-move: #6d8f72;
+  --accent-move-soft: rgba(109, 143, 114, 0.12);
+  /* 护眼：雾蓝紫（刻意降了饱和度，避免长时间注视引起疲劳） */
+  --accent-eye: #6b6597;
+  --accent-eye-soft: rgba(107, 101, 151, 0.11);
+
+  /* 已完成 / 已达标 —— 用绿色而不是勾选图标，
+     图标会显得像「任务」，颜色更像「状态」 */
+  --accent-done: #34855c;
+  --accent-done-soft: rgba(52, 133, 92, 0.055);
+  --accent-done-border: rgba(52, 133, 92, 0.16);
+
+  /* 需要吸引注意但不想制造焦虑时用的中性强调色 */
+  --accent-neutral: #4a5259;
+
+  /* -------------------------------------------------- 色彩：边框与分隔 */
+  --border-hair: rgba(11, 13, 16, 0.08);
+  --border-soft: rgba(11, 13, 16, 0.06);
+  --border-strong: rgba(11, 13, 16, 0.14);
+
+  /* -------------------------------------------------- 字体 */
+  /* 跟随系统字体：macOS 上就是 San Francisco，这是「原生感」的来源 */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+    "Helvetica Neue", Helvetica, Arial, sans-serif;
+  /* 计数、时间用等宽数字，避免数字跳动时整行宽度变化 */
+  --font-mono:
+    ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Mono",
+    monospace;
+
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 26px;
+  --text-3xl: 34px;
+  --text-display: 52px;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.7;
+
+  /* 字距：越大的字越要收紧，这样才「高级」 */
+  --tracking-tight: -0.015em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.02em;
+  /* 小号全大写标签用宽字距 */
+  --tracking-kicker: 0.22em;
+
+  /* -------------------------------------------------- 圆角 */
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+  --radius-full: 999px;
+
+  /* -------------------------------------------------- 间距 */
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 10px;
+  --space-5: 12px;
+  --space-6: 14px;
+  --space-7: 16px;
+  --space-8: 20px;
+  --space-9: 24px;
+  --space-10: 28px;
+  --space-11: 32px;
+  --space-12: 40px;
+
+  /* -------------------------------------------------- 阴影 */
+  /* 阴影都做得很浅：这是「安静」的一部分 */
+  --shadow-sm: 0 1px 2px rgba(11, 13, 16, 0.04);
+  --shadow-md: 0 2px 8px rgba(11, 13, 16, 0.06);
+  --shadow-lg: 0 8px 32px rgba(11, 13, 16, 0.1);
+  --shadow-window: 0 16px 64px rgba(11, 13, 16, 0.16);
+
+  /* -------------------------------------------------- 毛玻璃 */
+  /**
+   * 这里**故意没有** `backdrop-filter` 的模糊半径令牌。
+   *
+   * 曾经有过（`--blur-panel: blur(44px)`），但那是错的：Tauri 的透明窗口
+   * 就是一个没有背景色的 WKWebView，`backdrop-filter` 采样不到窗口背后的
+   * 桌面，写了等于没写 —— 只会让下一个读代码的人以为毛玻璃已经实现了。
+   *
+   * 真正的模糊由 macOS 提供，配在 `apps/desktop/tauri.conf.json` 的
+   * `windowEffects`（主面板用的是 `popover` 材质）。CSS 这边只负责
+   * 半透明白底和高光边框，见 `global.css` 的 `.panel`。
+   *
+   * 想知道完整的原因，读 `.panel` 上面那段注释。
+   */
+
+  /* -------------------------------------------------- 动效 */
+  /* 呼吸环：4 秒吸 / 6 秒呼 = 6 次/分（慢呼吸的生理依据） */
+  --breath-cycle: 10s;
+  /* 界面元素的状态过渡：快但不突兀 */
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --duration-fast: 0.16s;
+  --duration-normal: 0.24s;
+  --duration-slow: 0.38s;
+}
+
+/**
+ * 减少动态效果。
+ *
+ * WCAG 2.3.3 要求非必要的动画必须可以关闭。这条不是「可选的礼貌」——
+ * 前庭功能障碍的用户会因为画面运动产生眩晕、恶心。
+ *
+ * 注意这里连过渡时间也一起关掉：`animation: none` 不足以覆盖
+ * `transition`，而缓慢的过渡同样会让人不适。
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0.01ms;
+    --duration-normal: 0.01ms;
+    --duration-slow: 0.01ms;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

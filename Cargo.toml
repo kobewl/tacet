@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tacet-core",
+    "crates/tacet-context",
+    "crates/tacet-health",
+    "crates/tacet-storage",
+    "crates/tacet-platform",
+    "crates/platform-macos",
+    "apps/desktop",
+]
+
+# apps/desktop 是唯一的可执行程序，其余都是库。
+# 这样 `cargo run` 不需要指定 -p。
+default-members = ["apps/desktop"]
+
+# 版本号的「单一真值」：所有 crate 用 version.workspace = true 继承这里的值，
+# 将来 apps/desktop 的 tauri.conf.json 与 packages/ui/package.json 也从这里取，
+# 由 CI 脚本校验四处一致（研发规范 §3.3 红线 3）。
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+authors = ["liang"]
+repository = "https://github.com/tacet-app/tacet"
+
+# 依赖统一在这里声明版本，各 crate 用 dep.workspace = true 引用。
+# 好处：升级依赖只改一处；避免不同 crate 锁到不兼容的版本。
+[workspace.dependencies]
+tacet-core = { path = "crates/tacet-core" }
+tacet-context = { path = "crates/tacet-context" }
+tacet-health = { path = "crates/tacet-health" }
+tacet-storage = { path = "crates/tacet-storage" }
+tacet-platform = { path = "crates/tacet-platform" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+
+[profile.release]
+# 健康工具要「存在感低」：体积与峰值内存都往小里压（架构文档 §8 预算）。
+lto = true
+codegen-units = 1
+strip = true

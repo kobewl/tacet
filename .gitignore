@@ -1,0 +1,91 @@
+# macOS
+.DS_Store
+
+# Rust / Cargo
+target/
+
+# Node / 前端
+node_modules/
+dist/
+.pnpm-store/
+
+# 日志与临时文件
+*.log
+*.bak
+
+# Python（图标生成脚本用）
+__pycache__/
+*.py[cod]
+.venv/
+
+# Tauri 构建产物
+apps/desktop/gen/
+
+# 环境变量与密钥
+#
+# 研发规范 §8：API Key 与签名证书只存 GitHub Secrets / 本地钥匙串，禁止入库。
+#
+# ## 为什么这一段的规则写得又宽又啰嗦
+#
+# 密钥进了 commit 历史就没法真正撤回 —— 删掉文件只是让 `git log -p` 里
+# 少一行，历史对象仍然在，fork 过的仓库也复制了一份。唯一可靠的处理是
+# 作废并轮换密钥。所以这里是**唯一一处宁可多拦、不可漏拦**的地方。
+#
+# v0.4 接入 LLM 后会引入真实 API Key，那时这段规则就是第一道防线。
+.env
+.env.*
+!.env.example
+*.env
+!.env.example
+
+# 常见密钥/证书文件
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+*.provisionprofile
+*.cer
+*.crt
+*.asc
+*.gpg
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.ppk
+
+# 各类工具的凭据缓存（不一定在本仓库，但以防万一被拷进来）
+.aws/
+.ssh/
+.npmrc
+.pypirc
+.netrc
+auth.json
+credentials.json
+service-account*.json
+*token*.json
+*secret*.json
+
+# Tauri 签名相关（本地发布时会生成）
+apps/desktop/*.key
+apps/desktop/*.p12
+apps/desktop/.tauri/
+
+# 数据库（本地数据，绝不该进仓库）
+#
+# `tacet.db` 里存着 Intent 文本 —— 那是用户「下一步打算做什么」的原始记录，
+# 属于 P1 级隐私（数据模型 §9）。它比密钥更常被误提交，因为路径就在
+# 用户的 Application Support 目录下，调试时很容易顺手拷进仓库。
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# 个人配置
+.idea/
+.vscode/settings.json
+*.code-workspace

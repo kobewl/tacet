@@ -1,0 +1,14 @@
+[package]
+name = "tacet-context"
+description = "Tacet 上下文引擎：把平台信号变成「用户现在在做什么」"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+tacet-core.workspace = true
+tacet-platform.workspace = true
+serde.workspace = true

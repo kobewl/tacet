@@ -1,0 +1,97 @@
+/**
+ * 今日统计的样式。
+ *
+ * 视觉目标：读起来像一张「记录单」，而不是一个「成绩单」。
+ * 具体做法是 —— 数字用中性的深灰而不是品牌色或绿色，
+ * 也不做任何进度环、百分比条这类带评价意味的元素。
+ */
+
+.today-shell {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.today-loading {
+  padding: 40px 22px;
+  text-align: center;
+}
+
+.today-header {
+  padding: 22px 22px 16px;
+  flex: 0 0 auto;
+}
+
+.today-title {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+  margin: 8px 0 0;
+  color: var(--text-primary);
+}
+
+.today-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0 22px 22px;
+}
+
+.today-section {
+  margin-bottom: 22px;
+}
+
+.today-section-title {
+  margin-bottom: 10px;
+}
+
+.today-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.stat {
+  padding: 14px 15px;
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--border-soft);
+}
+
+.stat-label {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  margin-bottom: 6px;
+}
+
+.stat-value {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  /* 中性深灰：不是绿色（那像表扬），也不是红色（那像批评） */
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.stat-hint {
+  margin-top: 5px;
+  font-size: var(--text-xs);
+}
+
+.today-detail-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+}
+
+.today-detail-dot {
+  color: #d2d8dd;
+}
+
+.today-note {
+  text-align: center;
+  margin-top: 10px;
+  line-height: var(--leading-relaxed);
+  color: var(--text-quaternary);
+}

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tacet",
+  "version": "0.1.0",
+  "identifier": "app.tacet.desktop",
+  "build": {
+    "frontendDist": "../../packages/ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "pnpm --filter @tacet/ui dev",
+    "beforeBuildCommand": "pnpm --filter @tacet/ui build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "panel",
+        "title": "Tacet",
+        "width": 376,
+        "height": 520,
+        "resizable": false,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "url": "index.html",
+        "windowEffects": {
+          "effects": ["popover"],
+          "state": "active",
+          "radius": 20
+        }
+      },
+      {
+        "label": "break",
+        "title": "休息一下",
+        "width": 1440,
+        "height": 900,
+        "resizable": false,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "url": "index.html?view=break"
+      },
+      {
+        "label": "settings",
+        "title": "Tacet 设置",
+        "width": 520,
+        "height": 640,
+        "resizable": true,
+        "visible": false,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "url": "index.html?view=settings"
+      },
+      {
+        "label": "today",
+        "title": "今天的记录",
+        "width": 460,
+        "height": 560,
+        "resizable": true,
+        "visible": false,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "url": "index.html?view=today"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "category": "Healthcare and Fitness",
+    "shortDescription": "知道什么时候该开口，也知道什么时候该安静",
+    "longDescription": "Tacet 是一个理解你工作状态的健康助手。它会学习你的节奏，在合适的时间、用合适的方式提醒你休息、喝水和活动，而不是机械地打断你。所有数据都保存在本机，没有账号，没有云端。",
+    "copyright": "© 2026 liang",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "entitlements": "entitlements.plist"
+    }
+  }
+}

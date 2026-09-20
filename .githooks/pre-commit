@@ -1,0 +1,112 @@
+#!/bin/sh
+# Tacet 提交前钩子 —— 在敏感信息进入 git 历史**之前**拦下来。
+#
+# ## 为什么需要一个钩子，而不是只靠 CI
+#
+# CI 是**事后**检查：它跑在推送之后，此时密钥已经进了远端历史。
+# 即使 CI 变红、你立刻删掉文件，那个字符串依然在：
+#   - 本地的 `git log -p` 里
+#   - GitHub 的对象存储里（删分支也不会立刻回收）
+#   - 任何已经 fork / clone 过的人的硬盘上
+#
+# 唯一可靠的补救是作废并轮换密钥。所以唯一的出路是**不让它进去**。
+# 这个钩子在本地提交时拦住，是成本最低的一道闸门。
+#
+# ## 启用方式
+#
+#   git config core.hooksPath .githooks
+#
+# 这是一条本地配置，不会推到远端 —— 所以每个 clone 都要执行一次。
+# 它写在 README 的「开发环境」一节里。
+#
+# ## 关于误报
+#
+# 规则刻意写得**窄**：只匹配有明确前缀的密钥格式，以及确定的凭据文件类型。
+# 宽规则（比如「禁止 40 位以上的十六进制串」）会因为误报太多被人习惯性
+# `--no-verify` 绕过，最后等于没有。
+#
+# 如果确实需要提交（比如文档里要写密钥格式示例），用：
+#
+#   git commit --no-verify
+#
+# 但请先确认那**真的是**一个无害的示例。
+
+set -u
+
+red()  { printf '\033[31m%s\033[0m\n' "$1"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$1"; }
+green() { printf '\033[32m%s\033[0m\n' "$1"; }
+
+fail=0
+
+# ────────────────────────────────────────────────────────────
+# 一、文件名黑名单
+#
+# 这一类是「只要出现就一定是错的」—— 没有任何合法理由把它们提交。
+# ────────────────────────────────────────────────────────────
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+
+BAD_FILES=$(printf '%s\n' "$STAGED" | grep -E \
+  '(^|/)\.env($|\.)|\.(pem|p8|p12|pfx|jks|keystore|mobileprovision|provisionprofile|key)$|(^|/)(id_rsa|id_ed25519|id_ecdsa)|\.(db|sqlite|sqlite3)(-shm|-wal)?$|(^|/)(credentials|auth|service-account[^/]*)\.json$' \
+  | grep -v '\.env\.example$' || true)
+
+if [ -n "$BAD_FILES" ]; then
+  red "✋ 这些文件不该提交："
+  printf '%s\n' "$BAD_FILES" | sed 's/^/    /'
+  echo
+  echo "  它们要么是密钥/证书，要么是本地隐私数据（.db 里存着 Intent 文本）。"
+  echo "  如果确实需要入库，先确认内容无害，再用 git commit --no-verify 提交。"
+  fail=1
+fi
+
+# ────────────────────────────────────────────────────────────
+# 二、内容模式
+#
+# 只扫**本次新增的行**，而且是那些可能藏代码的文件。
+# 文档（.md）与 CI 配置排除在外：它们会正当地讨论密钥格式本身。
+# ────────────────────────────────────────────────────────────
+
+ADDED=$(git diff --cached --diff-filter=ACMR -U0 -- \
+  ':!*.md' ':!.github/workflows/*' ':!*.lock' ':!pnpm-lock.yaml' \
+  ':!*Cargo.lock' ':!.githooks/*' \
+  | grep -E '^\+' | grep -v '^+++' || true)
+
+if [ -n "$ADDED" ]; then
+  # 有明确厂商前缀的密钥格式。
+  # 这些前缀的存在本身就是「这是真密钥」的强证据 —— 没有别的用途。
+  HITS=$(printf '%s\n' "$ADDED" | grep -nE \
+    'sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|ghu_[A-Za-z0-9]{30,}|ghs_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}' \
+    || true)
+
+  if [ -n "$HITS" ]; then
+    red "✋ 新增的代码里出现了疑似密钥："
+    printf '%s\n' "$HITS" | cut -c1-160 | sed 's/^/    /'
+    echo
+    echo "  如果这是真的密钥：别提交。删掉它，改用环境变量或 GitHub Secrets。"
+    echo "  如果这只是一个示例：确认它无法用于任何真实服务，再 --no-verify。"
+    fail=1
+  fi
+
+  # 「赋值 + 长字面量」这种形态。比上一组宽松，所以单独提示、不直接拦 ——
+  # 它更可能是误报（比如一行测试数据），但值得让人多看一眼。
+  SOFT=$(printf '%s\n' "$ADDED" | grep -nEi \
+    '(api[_-]?key|secret|passwd|password|access[_-]?token|auth[_-]?token|private[_-]?key)[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9/+_-]{24,}["'"'"']' \
+    || true)
+
+  if [ -n "$SOFT" ] && [ "$fail" -eq 0 ]; then
+    yellow "⚠️  这几行看起来像在硬编码凭据，确认一下："
+    printf '%s\n' "$SOFT" | cut -c1-160 | sed 's/^/    /'
+    echo
+    echo "  （没有拦下这次提交。如果确实是密钥，请立刻停下并改用环境变量。）"
+    echo
+  fi
+fi
+
+if [ "$fail" -eq 0 ]; then
+  exit 0
+fi
+
+echo
+red "提交已中止。"
+exit 1

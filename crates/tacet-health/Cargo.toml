@@ -1,0 +1,16 @@
+[package]
+name = "tacet-health"
+description = "Tacet 健康引擎：四类需求评分与时机窗口（零平台依赖）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+tacet-core.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

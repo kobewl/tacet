@@ -1,0 +1,769 @@
+//! 窗口管理 —— 把「该提醒了」翻译成屏幕上真实发生的事。
+//!
+//! ## 四类窗口
+//!
+//! | label | 用途 | 特性 |
+//! | --- | --- | --- |
+//! | `panel` | 菜单栏下拉主面板 | 无边框、透明、常在最前、失焦自动隐藏 |
+//! | `break` | 全屏休息流程 | 覆盖全屏、毛玻璃 |
+//! | `settings` | 设置页 | 常规窗口，可调整大小 |
+//! | `today` | 今日记录 | 常规窗口 |
+//!
+//! ## 全屏 Overlay 的三条硬约束（PRD §3.3）
+//!
+//! 1. **永不锁屏** —— 这里只是显示一个窗口，不碰任何系统级拦截
+//! 2. **必须提供 Skip** —— 界面里有「这次不用」，且始终可见
+//! 3. **不得阻塞系统快捷键** —— 窗口不设置为 modal，
+//!    `cmd+tab` / 输入法切换照常可用
+//!
+//! ## 关于「不抢焦点」
+//!
+//! 这一条在 macOS 上需要小心处理。全屏提醒窗口如果抢走键盘焦点，
+//! 用户正在输入的内容会中断（比如代码写到一半）。
+//!
+//! 当前实现选择**允许**窗口获得焦点：因为休息流程的第一步就是
+//! 让用户点「现在休息」，如果窗口不接受点击，整个流程就走不下去。
+//! 代价是用户如果在输入长文本时被打断，可能会丢一点点正在打的内容。
+//!
+//! 这是一个刻意的取舍，也是 **R-01 风险**里说的「Overlay 窗口层级/焦点
+//! 行为需实测」的那一项。等真实使用一段时间后再决定要不要改成
+//! 非激活面板（`NSPanel` + `nonactivatingPanel`）。
+
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+
+use crate::state::AppState;
+use std::sync::{Arc, Mutex};
+
+/// 覆盖其它屏幕的「幕布」窗口的 label 前缀。
+///
+/// 用前缀而不是固定名字，是因为幕布的数量取决于用户接了几块屏 ——
+/// 一台笔记本可能一块，接上扩展坞就变成三块。
+const VEIL_PREFIX: &str = "break-veil-";
+
+/// 显示全屏休息窗口（询问界面，只覆盖一块屏）。
+///
+/// ## 为什么这里不盖住所有屏幕
+///
+/// 这个函数在**提醒刚弹出、用户还没做决定**的时候被调用。此刻他要看到的
+/// 是一个问题（「要不要现在休息？」），而不是被强行剥夺所有屏幕的使用权。
+/// 他完全可能点「3 分钟后」然后继续工作 —— 那这时候把副屏糊掉就是纯粹的
+/// 冒犯，而且会让他对这个产品产生敌意。
+///
+/// 所以覆盖其它屏幕的动作放在 `show_break_veils` 里，由用户在
+/// 「现在休息」按钮上按下之后才触发。**先问，再做** —— 这条界线
+/// 是「提醒」和「绑架」的分界，不能含糊。
+pub fn show_break_window(app: &AppHandle) -> tauri::Result<()> {
+    let target = monitor_under_cursor(app);
+
+    if let Some(window) = app.get_webview_window("break") {
+        // 只有「从隐藏变成显示」才算一次重新打开。
+        //
+        // 这个判断很关键：用户在休息流程中间（比如填完待办点「开始休息」）
+        // 会再次触发 `start_break`，那时窗口本来就是可见的。
+        // 如果把这种情况也当成「重新打开」，前端会把阶段重置回
+        // 「填写待办」—— 用户刚点完「开始休息」，界面却又问他要做什么。
+        let reopening = !window.is_visible().unwrap_or(false);
+
+        // 每次显示前重新适配当前屏幕 —— 用户可能换了显示器、
+        // 或者把窗口拖到了另一块屏上。
+        if let Some(monitor) = &target {
+            fit_to_monitor(&window, monitor);
+        }
+        window.show()?;
+        window.set_focus()?;
+
+        if reopening {
+            announce_break_shown(app);
+        }
+        return Ok(());
+    }
+
+    // 窗口在 tauri.conf.json 里已经声明过（label = "break"），
+    // 正常情况下 `get_webview_window` 就能拿到。走到这里说明配置有出入，
+    // 我们动态创建一个作为兜底 —— 提醒不能因为配置问题就发不出来。
+    let window = WebviewWindowBuilder::new(
+        app,
+        "break",
+        WebviewUrl::App("index.html?view=break".into()),
+    )
+    .title("休息一下")
+    .inner_size(1440.0, 900.0)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .build()?;
+
+    if let Some(monitor) = &target {
+        fit_to_monitor(&window, monitor);
+    }
+    window.show()?;
+    window.set_focus()?;
+    announce_break_shown(app);
+
+    Ok(())
+}
+
+/// 告诉休息界面「你被重新打开了，把流程重置到正确的阶段」。
+///
+/// ## 为什么必须做这件事
+///
+/// 隐藏窗口**不会卸载网页**。窗口再次显示时，React 组件还停在
+/// 上一次离开时的阶段 —— 如果上一次休息是正常结束的，那个阶段是
+/// `done`（「欢迎回来」）。
+///
+/// 于是第二次提醒弹出来的时候，用户看到的是「欢迎回来」和一个
+/// 「继续」按钮，而不是「建议休息一下」。整个提醒就废了：
+/// 它看起来像一个没关掉的旧窗口。
+///
+/// ## 为什么不带参数
+///
+/// 事件的载荷里不写「应该进哪个阶段」，而是让前端自己去读一次最新快照。
+/// 理由是**状态真值只有一份**（在 Rust 侧）：把阶段判断放在前端，
+/// 就多了一处可能与真实状态不同步的地方。前端拿到 `state === "breaking"`
+/// 就知道「用户已经同意休息了，该显示待办输入」，否则显示询问。
+pub fn announce_break_shown(app: &AppHandle) {
+    broadcast(app, serde_json::json!({ "type": "breakShown" }));
+}
+
+/// 找出用户此刻在看哪块屏幕。
+///
+/// ## 为什么选「鼠标所在的屏幕」
+///
+/// 多显示器场景下，用户此刻在看哪块屏？鼠标位置是最可靠的信号
+/// （macOS 上鼠标坐标就是全局坐标）。用主屏是次优选择 ——
+/// 如果用户把笔记本合上盖、只用外接显示器，主屏可能不是他在看的那块。
+///
+/// 取不到鼠标所在屏幕时退回主屏；再取不到就返回 `None`
+/// （调用方会保持窗口原有尺寸，宁可显示得小一点，也不能因为探测失败
+/// 就不显示提醒）。
+///
+/// ## 三个调用方
+///
+/// 休息窗口（决定盖哪块屏）、设置窗口与今日记录窗口（决定摆在哪）。
+/// 后两者是后来加上的：窗口如果不自己摆位置，macOS 会按自己的心情放 ——
+/// 实测会跑到另一块显示器上，而用户正在看的是这一块，
+/// 于是「点了设置，屏幕上什么都没出现」。
+fn monitor_under_cursor(app: &AppHandle) -> Option<tauri::Monitor> {
+    // 鼠标位置在物理坐标系里（macOS 的全局坐标），需要反查它在哪块屏上。
+    //
+    // 用 `get_webview_window("break")` 拿光标位置是历史原因：
+    // Tauri 只在窗口上暴露 `cursor_position()`。窗口可能还没建出来，
+    // 那种情况下直接退回主屏。
+    let cursor = app
+        .get_webview_window("break")
+        .and_then(|window| window.cursor_position().ok());
+
+    if let Some(cursor) = cursor {
+        let hit = app.available_monitors().ok()?.into_iter().find(|m| {
+            let origin = m.position();
+            let size = m.size();
+            let x = cursor.x as i32;
+            let y = cursor.y as i32;
+
+            x >= origin.x
+                && x < origin.x + size.width as i32
+                && y >= origin.y
+                && y < origin.y + size.height as i32
+        });
+        if hit.is_some() {
+            return hit;
+        }
+    }
+
+    app.primary_monitor().ok().flatten()
+}
+
+/// 把窗口撑满指定的那块屏幕。
+///
+/// ## 为什么必须做这件事
+///
+/// 窗口尺寸在 `tauri.conf.json` 里写的是 1440×900。这个值在 13 寸
+/// MacBook（正好 1440×900）上恰好铺满，看起来很对 —— 所以这个问题
+/// 在开发机上不会暴露。
+///
+/// 但换到 27 寸显示器（逻辑 2560×1440）或 Studio Display 上，
+/// 它只占屏幕的四分之一，变成一个居中的小方块。这不影响功能，
+/// 但**破坏了这个界面的设计意图**：它原本要靠「铺满、无信息可看、
+/// 留白极大」在心理上推用户离开屏幕。缩成小方块之后，
+/// 看起来像程序出错了，而不是一个刻意的休息提醒。
+///
+/// ## 关于「撑满」的边界
+///
+/// 用 `set_size` 到屏幕的物理尺寸、`set_position` 到屏幕原点，
+/// 而不是调用 `set_fullscreen(true)`。原因见文件顶部注释：
+/// 进入系统原生全屏会让 macOS 为窗口单独创建一个 Space，
+/// 那种情况下 Esc 退不出来、Cmd+Tab 行为也会变 —— 那才是
+/// 真正会困住用户的机制。我们要的是「浮在上面的一层玻璃」，
+/// 不是「霸占一个虚拟桌面」。
+fn fit_to_monitor(window: &tauri::WebviewWindow, monitor: &tauri::Monitor) {
+    let size = monitor.size();
+    let position = monitor.position();
+
+    let _ = window.set_position(tauri::PhysicalPosition::new(position.x, position.y));
+    let _ = window.set_size(tauri::PhysicalSize::new(size.width, size.height));
+}
+
+/// 在**除当前屏以外**的每块屏幕上都盖一层幕布。
+///
+/// ## 为什么需要这件事
+///
+/// 只盖住一块屏的「全屏休息」是假的：用户直接把鼠标移到另一块屏幕
+/// 就能继续干活，休息被绕过去了。产品承诺的是真的让人停下来，
+/// 那就得把每一块屏都算进去。
+///
+/// ## 为什么是「幕布」而不是「每块屏一个完整界面」
+///
+/// 每块屏都渲染一套完整的倒计时+按钮+输入框，会有两个问题：
+///
+/// 1. **状态不同步**：四个窗口各自维护自己的阶段（询问/填写/休息中），
+///    用户在副屏点了「跳过」，主屏还停在询问态 —— 界面互相打脸。
+/// 2. **注意力被摊薄**：用户不知道该看哪块屏，视线在屏幕间跳来跳去。
+///
+/// 所以副屏只做一件最简单的事：**挡住视线，并告诉他还要多久**。
+/// 所有操作集中在主屏那一处。（副屏也留了出口：点击或按 Esc
+/// 都会把意图转给主屏处理，见 `BreakVeil` 组件。）
+///
+/// ## 失败要降级，不能连坐
+///
+/// 幕布建不出来（权限、系统限制）时只记一条日志 —— 主屏的休息界面
+/// 已经正常显示了，核心功能没有丢。因为一个附加的遮挡层而让整个
+/// 休息流程失败，是本末倒置。
+pub fn show_break_veils(app: &AppHandle) -> tauri::Result<()> {
+    let primary = monitor_under_cursor(app);
+    let monitors = app.available_monitors()?;
+
+    // 单屏用户（大多数）走这条路：什么都不用做。
+    if monitors.len() < 2 {
+        return Ok(());
+    }
+
+    // 这次需要哪几块幕布。跳过主屏（它上面是完整的休息界面）。
+    //
+    // 真正的决定交给下面那个纯函数：`tauri::Monitor` 没法在单测里构造，
+    // 但「哪块屏该盖、哪块该跳过」恰恰是这个功能里最容易写错的部分，
+    // 必须能测。
+    let screens: Vec<ScreenBox> = monitors.iter().map(ScreenBox::from).collect();
+    let targets = veil_targets(&screens, primary.as_ref().map(ScreenBox::from));
+
+    let mut wanted: Vec<(String, tauri::Monitor)> = Vec::new();
+    for index in targets {
+        let label = format!("{VEIL_PREFIX}{}", wanted.len());
+        wanted.push((label, monitors[index].clone()));
+    }
+
+    if wanted.is_empty() {
+        // 单屏，或主屏是唯一那块。这是个正常的常见情况，不用记日志。
+        return Ok(());
+    }
+
+    crate::logging::info(&format!(
+        "幕布：{} 块屏幕需要遮挡（共检测到 {} 块屏）",
+        wanted.len(),
+        monitors.len()
+    ));
+
+    // 收掉不再需要的幕布。用户可能换过显示器 —— 屏幕数量一变，
+    // 旧的编号就指到别的屏上了，留着会盖错地方。
+    for (label, window) in app.webview_windows() {
+        if label.starts_with(VEIL_PREFIX) && !wanted.iter().any(|(l, _)| l == &label) {
+            // 这里是真正销毁而不是隐藏：这块屏已经不存在了，
+            // 留着这个窗口网页只是白占内存。
+            let _ = window.close();
+        }
+    }
+
+    for (label, monitor) in &wanted {
+        let window = match app.get_webview_window(label) {
+            // 复用上次留下的窗口：页面已经加载好了，显示出来是瞬间的。
+            // 重新创建会在屏幕上闪一下白，那种「闪」在一个刻意安静的
+            // 界面上非常刺眼。
+            Some(window) => window,
+            None => WebviewWindowBuilder::new(
+                app,
+                label,
+                WebviewUrl::App("index.html?view=veil".into()),
+            )
+            .title("Tacet")
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .shadow(false)
+            // ── 焦点：幕布永远不抢键盘焦点 ──
+            //
+            // 这一条不是「更优雅」，是「必须」。
+            //
+            // macOS 上显示一个窗口（`set_visible(true)`）走的是
+            // `makeKeyAndOrderFront` —— 它会把窗口设为 key window，
+            // 也就是**抢走键盘焦点**。而幕布是在用户点完「现在休息」、
+            // 正要填写「接下来准备做什么」的那一刻创建的：
+            // 焦点被抢走，输入框就废了，用户打不了字也不知道为什么。
+            //
+            // `focusable(false)` 让这个窗口永远不会成为 key window，
+            // 从根上避免这件事。用户想用幕布上的出口（点击 / Esc）
+            // 也不需要焦点 —— 点击会先激活窗口，而 Esc 走的是
+            // 主窗口那条路。
+            .focusable(false)
+            .focused(false)
+            .visible(false)
+            .build()?,
+        };
+
+        fit_to_monitor(&window, monitor);
+        window.show()?;
+    }
+
+    Ok(())
+}
+
+/// 一块屏的标识 —— 只有「位置 + 尺寸」。
+///
+/// 为什么不用 `tauri::Monitor` 直接比较：一是它没法在单测里构造，
+/// 二是我们本来也只需要这两项。**不比较 `name()`**：
+/// 外接屏的名字可能是空字符串，而且同型号的两块屏名字完全一样。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenBox {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl From<&tauri::Monitor> for ScreenBox {
+    fn from(monitor: &tauri::Monitor) -> Self {
+        let position = monitor.position();
+        let size = monitor.size();
+        Self {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        }
+    }
+}
+
+/// 算出这次要给哪几块屏盖幕布（返回它们在 `screens` 里的下标）。
+///
+/// 规则只有一条：**跳过主屏** —— 那块屏上是完整的休息界面，
+/// 再盖一层幕布会把倒计时和按钮一起糊掉。
+///
+/// 主屏认不出来时（`None`）返回全部屏幕。这是有意的降级：
+/// 宁可多盖一块（用户还能在主屏上操作），也不要漏盖 ——
+/// 漏盖意味着休息可以被绕过，那这个功能就白做了。
+fn veil_targets(screens: &[ScreenBox], primary: Option<ScreenBox>) -> Vec<usize> {
+    screens
+        .iter()
+        .enumerate()
+        .filter(|(_, screen)| match primary {
+            Some(p) => **screen != p,
+            // 认不出主屏：全盖（理由见上）。
+            None => true,
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// 收起所有幕布窗口（只隐藏，留着下次复用）。
+pub fn hide_break_veils(app: &AppHandle) {
+    for (label, window) in app.webview_windows() {
+        if label.starts_with(VEIL_PREFIX) {
+            let _ = window.hide();
+        }
+    }
+}
+
+/// 兜底：主窗口不在时，幕布也不能在。
+///
+/// ## 为什么需要这条不变量
+///
+/// 幕布存在的唯一理由是「给主屏的休息界面打配合」。如果主界面已经不在了，
+/// 幕布就变成了纯粹的故障：用户的副屏糊着一层白雾，主屏什么都没有，
+/// 而且界面上没有任何按钮能让他恢复 —— 这比不休息糟得多。
+///
+/// 正常路径下两者永远成对（`hide_break_window` 一起收），但「正常路径」
+/// 覆盖不了所有情况：webview 崩了、前端某个分支忘了调关闭命令、
+/// 将来有人加了新的关闭方式却没读这段注释。这类问题的代价太高，
+/// 值得用一条每秒都在执行的不变量兜住。
+///
+/// ## 为什么不在状态变化时检查，而是每次 tick
+///
+/// tick 是应用里唯一持续推进的节拍（10 秒一次），所有窗口状态的最终一致
+/// 都可以搭它的车。相比在每个可能出错的地方都记得调用一次，
+/// 「每次 tick 都核对一遍事实」是更省心也更难写错的做法。
+///
+/// 这条检查很便宜：就是读两个窗口的可见性，10 秒一次。
+pub fn reconcile_break_windows(app: &AppHandle) {
+    let Some(main) = app.get_webview_window("break") else {
+        // 主窗口还没建出来（应用刚启动）：那就不该有任何幕布。
+        hide_break_veils(app);
+        return;
+    };
+
+    // 主窗口不可见 → 幕布也不该可见。
+    //
+    // 注意这里判的是**可见性**而不是工作状态：询问阶段（用户还没点
+    // 「现在休息」）主窗口是可见的，而工作状态仍是 Working ——
+    // 拿状态当依据会把询问界面一起收掉，那是个 bug。
+    if !main.is_visible().unwrap_or(false) {
+        hide_break_veils(app);
+    }
+}
+
+/// 关闭全屏休息窗口（连同所有幕布）。
+///
+/// 这两件事永远成对发生，所以合成一个入口 —— 只关主窗口会让副屏
+/// 继续盖着白雾，用户看到的是「休息结束了但屏幕还是坏的」。
+pub fn hide_break_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("break") {
+        let _ = window.hide();
+    }
+    hide_break_veils(app);
+}
+
+/// 显示（或聚焦）菜单栏主面板。
+///
+/// 面板的位置：贴着菜单栏图标的下方。macOS 上通过托盘的事件里
+/// 能拿到图标的位置，但 Tauri 的跨平台 API 没有暴露它。
+/// v0.1 的做法是显示在屏幕右上角 —— 与菜单栏图标的水平位置一致，
+/// 这符合用户的预期（菜单栏应用的下拉面板总在图标下方）。
+pub fn toggle_panel(app: &AppHandle) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window("panel") else {
+        return Ok(());
+    };
+
+    if window.is_visible().unwrap_or(false) {
+        window.hide()?;
+        return Ok(());
+    }
+
+    position_panel(app, &window);
+    window.show()?;
+    window.set_focus()?;
+    Ok(())
+}
+
+/// 把面板窗口放到右上角（菜单栏下方）。
+fn position_panel(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = app.primary_monitor() else {
+        return;
+    };
+
+    let scale = monitor.scale_factor();
+    let size = monitor.size();
+    let window_size = window
+        .outer_size()
+        .unwrap_or(tauri::PhysicalSize::new(376, 520));
+
+    // 逻辑坐标：右上角留 16px 边距，顶部留出菜单栏高度（约 28 逻辑像素）
+    let margin = (16.0 * scale) as i32;
+    let menubar = (28.0 * scale) as i32;
+
+    let x = size.width as i32 - window_size.width as i32 - margin;
+    let y = monitor.position().y + menubar;
+
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+/// 把一扇「常规窗口」呈现到用户面前 —— 设置页、今日记录都走这里。
+///
+/// ## 三步，每一步都对应一个真实踩过的坑
+///
+/// **一、先还原。** 窗口可能被用户最小化过（黄按钮 / `⌘M`）。
+/// `tao` 的 `set_focus()` 在窗口处于最小化状态时会**直接跳过**
+/// （见 `tao/src/platform_impl/macos/window.rs`：`if !is_minimized && is_visible`），
+/// 而它内部用的 `makeKeyAndOrderFront` 也不会把窗口从 Dock 里拉回来。
+/// 于是「点设置」的表现就是**什么都没有发生** —— 窗口确实还在，
+/// 只是永远回不到屏幕上。这一条是「点了没反应」最隐蔽的来源。
+///
+/// **二、自己摆位置。** 不摆的话位置由 macOS 决定。实测在双屏机器上
+/// 它会跑到**另一块显示器**上（用户正看着的那块屏幕什么都不出现），
+/// 而且窗口还会被系统按目标屏的缩放比重算尺寸。所以这里显式地
+/// 摆到「鼠标所在那块屏」的正中间 —— 用户正在看哪块屏，窗口就出现在哪块屏。
+///
+/// 代价是用户拖动过窗口位置后，下次打开会回到居中。这个取舍是有意的：
+/// 一个「总是在你看的那块屏中央出现」的设置窗口，比一个「记得上次位置、
+/// 但可能出现在你看不到的地方」的设置窗口可靠得多。后者正是这次要修的 bug。
+///
+/// **三、显示 + 取焦，顺序不能反。** `show()` 只负责让它可见；
+/// 把应用激活到前台、把键盘焦点抢过来的是 `set_focus()`
+/// （`tao` 的 `util::set_focus` 会在 `makeKeyAndOrderFront` 之后调
+/// `activateIgnoringOtherApps`）。少了后者，窗口可能可见但不是 key window，
+/// 用户会觉得界面「点不动」。
+///
+/// 失败一律忽略：这三步里任何一步在某些系统配置下都可能不被允许，
+/// 但把窗口留在屏幕上总比让整个命令报错好 —— 命令层会记日志。
+fn present_document_window(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let _ = window.unminimize();
+    center_on_cursor_monitor(app, window);
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+/// 把窗口摆到鼠标所在那块屏的正中间。
+///
+/// 取不到屏幕或窗口尺寸时什么都不做 —— 保持原位置也比摆到一个
+/// 算错的坐标上强。
+fn center_on_cursor_monitor(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let Some(monitor) = monitor_under_cursor(app) else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+
+    let (x, y) = centered_origin(&ScreenBox::from(&monitor), size.width, size.height);
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+/// 居中摆放的坐标计算（纯函数，便于测试）。
+///
+/// ## 为什么要用 i64 中间量
+///
+/// 窗口可能比屏幕还大（用户在 13 寸屏上把设置窗口拉到很宽，然后
+/// 换到一块更小的屏上）。那种情况下 `宽度差 / 2` 是**负数**，
+/// 在 u32 上会回绕成一个巨大的正数，把窗口甩到屏幕外。
+/// 用有符号计算就不会：负数只是让窗口的左边缘超出屏幕一点，仍然可见。
+fn centered_origin(screen: &ScreenBox, window_width: u32, window_height: u32) -> (i32, i32) {
+    let dx = (screen.width as i64 - window_width as i64) / 2;
+    let dy = (screen.height as i64 - window_height as i64) / 2;
+
+    ((screen.x as i64 + dx) as i32, (screen.y as i64 + dy) as i32)
+}
+
+/// 打开设置窗口（已开则唤回到前台）。
+pub fn open_settings(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("settings") {
+        present_document_window(app, &window);
+        return Ok(());
+    }
+
+    // 走到这里说明配置里声明的窗口没被创建出来。兜底也要保持一致的
+    // 外观：不透明（设置页自己画实底，见 global.css 的说明）。
+    let window = WebviewWindowBuilder::new(
+        app,
+        "settings",
+        WebviewUrl::App("index.html?view=settings".into()),
+    )
+    .title("Tacet 设置")
+    .inner_size(520.0, 640.0)
+    .title_bar_style(tauri::TitleBarStyle::Overlay)
+    .build()?;
+
+    present_document_window(app, &window);
+
+    Ok(())
+}
+
+/// 打开今日记录窗口（已开则唤回到前台）。
+pub fn open_today(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("today") {
+        present_document_window(app, &window);
+        return Ok(());
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        "today",
+        WebviewUrl::App("index.html?view=today".into()),
+    )
+    .title("今天的记录")
+    .inner_size(460.0, 560.0)
+    .title_bar_style(tauri::TitleBarStyle::Overlay)
+    .build()?;
+
+    present_document_window(app, &window);
+
+    Ok(())
+}
+
+/// 发一条系统通知。
+///
+/// 通知文案由 `state::notification_text` 生成（那里遵守 PRD §5 的语气规范）。
+/// 这里只负责把它送出去，并在失败时**静默降级** ——
+/// 用户拒绝了通知权限，不该导致任何报错弹窗（原则 7 的精神：
+/// 能力缺失不是打扰的理由）。
+pub fn send_notification(app: &AppHandle, title: &str, body: &str) -> tauri::Result<()> {
+    use tauri_plugin_notification::NotificationExt;
+
+    match app.notification().builder().title(title).body(body).show() {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // 权限被拒 / 系统不支持：记一条日志就够了。
+            // 界面上的「这台电脑上的能力」那一节会如实说明状态。
+            crate::logging::warn(&format!("通知发送失败（已静默降级）：{err}"));
+            Ok(())
+        }
+    }
+}
+
+/// 广播一条事件给所有界面窗口。
+pub fn broadcast(app: &AppHandle, payload: serde_json::Value) {
+    let _ = app.emit("tacet:event", payload);
+}
+
+/// 广播「用户想收起休息界面」。
+///
+/// 由幕布窗口（副屏上那层遮挡）在用户点击或按 Esc 时触发，
+/// 主窗口收到后按自己的阶段决定该做什么 —— 见 `commands::dismiss_break`。
+///
+/// 用事件而不是直接调命令：幕布和主窗口是两个独立窗口，
+/// 它们之间没有调用关系；而事件通道本来就是为这种「广播给所有界面」
+/// 设计的（快照推送走的就是同一条路）。
+pub fn broadcast_dismiss(app: &AppHandle) {
+    broadcast(app, serde_json::json!({ "type": "dismiss" }));
+}
+
+/// 命令层用的状态类型别名。
+pub type SharedState = Arc<Mutex<AppState>>;
+
+// ============================================================ 测试
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 造一块屏。参数就是位置和尺寸，够用了。
+    fn screen(x: i32, y: i32, width: u32, height: u32) -> ScreenBox {
+        ScreenBox {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// 笔记本自带屏（逻辑 1440×900，原点在 (0,0)）。
+    fn builtin() -> ScreenBox {
+        screen(0, 0, 1440, 900)
+    }
+
+    /// 一台外接显示器，摆在笔记本右边。
+    fn external() -> ScreenBox {
+        screen(1440, 0, 2560, 1440)
+    }
+
+    #[test]
+    fn 只有一块屏时不需要幕布() {
+        // 单屏用户（大多数）走的就是这条路 —— 不该平白多出窗口。
+        let targets = veil_targets(&[builtin()], Some(builtin()));
+        assert!(targets.is_empty(), "单屏不该产生幕布，实际：{targets:?}");
+    }
+
+    #[test]
+    fn 接了两块屏时只盖非主屏那块() {
+        let screens = [builtin(), external()];
+        let targets = veil_targets(&screens, Some(builtin()));
+
+        assert_eq!(targets, vec![1], "应该只盖外接屏");
+    }
+
+    #[test]
+    fn 主屏在外接屏右边时也能认出来() {
+        // 用户把主屏设成了外接显示器，笔记本在左边。
+        // 这个用例是防「默认主屏总在 (0,0)」这种假设 —— 那是错的。
+        let screens = [screen(-1440, 0, 1440, 900), builtin()];
+        let targets = veil_targets(&screens, Some(builtin()));
+
+        assert_eq!(targets, vec![0], "主屏在列表第二位时要正确跳过它");
+    }
+
+    #[test]
+    fn 三块屏时盖住另外两块() {
+        // 笔记本 + 两台外接屏：合上盖只用外接屏的人不少，
+        // 所以这里也把「主屏不在第一项」的情况覆盖了。
+        let left = screen(-2560, 0, 2560, 1440);
+        let right = screen(1440, 0, 2560, 1440);
+        let screens = [left, builtin(), right];
+
+        let targets = veil_targets(&screens, Some(builtin()));
+
+        assert_eq!(targets, vec![0, 2], "三块屏时应该盖住另外两块");
+        assert!(
+            !targets.contains(&1),
+            "主屏不能出现在幕布列表里 —— 那会把倒计时和按钮一起糊掉"
+        );
+    }
+
+    #[test]
+    fn 认不出主屏时全部盖住() {
+        // 降级方向必须选对：宁可多盖一块（用户还能在主屏上操作），
+        // 也不要漏盖 —— 漏盖意味着休息可以被绕过，这个功能就白做了。
+        let screens = [builtin(), external()];
+        let targets = veil_targets(&screens, None);
+
+        assert_eq!(targets, vec![0, 1], "认不出主屏时要全盖");
+    }
+
+    #[test]
+    fn 同型号的两块外接屏不会被当成同一块() {
+        // 这是「不比较 name()」那个决定的原因：两块同型号的屏名字一样，
+        // 但位置不同。用位置+尺寸判断才靠得住。
+        let a = screen(1440, 0, 2560, 1440);
+        let b = screen(4000, 0, 2560, 1440);
+
+        assert_ne!(a, b, "位置不同就是两块不同的屏");
+        assert_eq!(
+            veil_targets(&[a, b], Some(a)),
+            vec![1],
+            "同型号的屏不能因为名字一样就被误判成同一块"
+        );
+    }
+
+    #[test]
+    fn 幕布的标签前缀不会和主窗口撞名() {
+        // 主窗口的 label 是 "break"。如果幕布也用 "break" 系列的名字，
+        // get_webview_window("break") 可能取到幕布，整个休息流程就错乱了。
+        assert!(!VEIL_PREFIX.is_empty());
+        assert!(
+            !"break".starts_with(VEIL_PREFIX),
+            "主窗口的 label 不能落在幕布的前缀下"
+        );
+    }
+
+    // ======================================================== 常规窗口居中
+
+    #[test]
+    fn 窗口居中于屏幕() {
+        // 笔记本屏 1440×900，窗口 520×640：
+        // x = (1440-520)/2 = 460，y = (900-640)/2 = 130
+        let (x, y) = centered_origin(&builtin(), 520, 640);
+
+        assert_eq!((x, y), (460, 130));
+    }
+
+    #[test]
+    fn 屏幕原点不在零零时也居中() {
+        // 外接屏摆在笔记本右边，原点 (1440, 0)。窗口必须落在这块屏的
+        // 中央，而不是 (0,0) 附近的绝对坐标 —— 这个用例防的是
+        // 「忘了加屏幕原点」这种看起来对、实际跑到另一块屏上的错误。
+        let external = screen(1440, 0, 2560, 1440);
+        let (x, y) = centered_origin(&external, 520, 640);
+
+        assert_eq!(x, 1440 + (2560 - 520) / 2);
+        assert_eq!(y, (1440 - 640) / 2);
+        assert!(x >= 1440, "窗口必须落在外接屏上，实际 x={x}");
+    }
+
+    #[test]
+    fn 窗口比屏幕还大时不会跑到屏幕外() {
+        // 用户在 13 寸屏上把设置窗口拉宽，然后换到一块更小的屏上。
+        // 宽度差为负时若用无符号计算会回绕成一个巨大的正数，
+        // 把窗口甩到屏幕外 —— 这里断言它只是稍微超出左/上边缘。
+        let small = screen(0, 0, 400, 300);
+        let (x, y) = centered_origin(&small, 520, 640);
+
+        assert_eq!((x, y), (-60, -170), "应当允许负值，而不是回绕");
+    }
+
+    #[test]
+    fn 屏幕原点为负时也居中() {
+        // 有些显示器配置会把屏放在负坐标区（例如主屏在右、副屏在左）。
+        let left = screen(-1440, 0, 1440, 900);
+        let (x, y) = centered_origin(&left, 520, 640);
+
+        assert_eq!(x, -1440 + (1440 - 520) / 2);
+        assert!(x < 0, "负原点的屏上，窗口的 x 也可能是负的");
+        assert_eq!(y, (900 - 640) / 2);
+    }
+}

@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>08 设置页</title>
+<style>
+
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#F5F6F7;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",Arial,sans-serif;color:#1F2329;-webkit-font-smoothing:antialiased;font-size:14px}
+.page{position:relative;display:flex;flex-direction:column;gap:20px;padding:34px 44px 30px;overflow:hidden}
+.cap{display:flex;align-items:baseline;justify-content:space-between;flex:0 0 auto}
+.cap .t{font-size:14px;font-weight:600;color:#3C444C;letter-spacing:.01em}
+.cap .t em{font-style:normal;color:#A8AEB5;font-weight:600;margin-right:9px;font-variant-numeric:tabular-nums}
+.cap .v{font-size:11.5px;color:#A8AEB5;letter-spacing:.06em}
+.stage{flex:1;display:flex;align-items:center;justify-content:center;gap:26px}
+.stage-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px}
+.stage-bleed{flex:1;display:flex;align-items:center;justify-content:center;margin:-34px -44px -30px;border-radius:0}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+
+/* ---------- 通用细节 ---------- */
+.tile{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.tile svg{width:18px;height:18px}
+.t-teal{background:#E7F5F3;color:#2FA8A0}
+.t-water{background:#E9F2FB;color:#4A9FE0}
+.t-move{background:#FDF1E6;color:#DE8B41}
+.t-eye{background:#F0EDFB;color:#8B7BD8}
+.t-ok{background:#E9F6EF;color:#4CAF7D}
+.t-gray{background:#EFF1F3;color:#7C858E}
+.sub{font-size:12px;color:#98A0A8}
+.ok{color:#4CAF7D}
+
+/* 开关 */
+.sw{width:40px;height:24px;border-radius:12px;background:#D5DADF;position:relative;flex:0 0 auto;transition:.2s}
+.sw i{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.18);transition:.2s}
+.sw.on{background:#2FA8A0}
+.sw.on i{left:18px}
+
+/* 按钮 */
+.btn{border:none;border-radius:10px;font-size:13.5px;font-weight:500;font-family:inherit;cursor:default;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn-primary{background:#2FA8A0;color:#fff;height:38px;padding:0 18px;box-shadow:0 2px 8px rgba(47,168,160,.28)}
+.btn-ghost{background:#fff;color:#3C444C;height:38px;padding:0 16px;border:1px solid #E1E5E9}
+.btn-quiet{background:#F2F4F5;color:#5A636C;height:34px;padding:0 14px}
+.btn-plain{background:transparent;color:#8B939B;font-size:13px;height:30px;padding:0 6px}
+
+/* 窗口 / 面板 */
+.win{background:#fff;border-radius:16px;box-shadow:0 22px 50px rgba(16,24,32,.14),0 2px 8px rgba(16,24,32,.06);border:1px solid rgba(20,28,36,.05);overflow:hidden;position:relative}
+.tl{display:flex;gap:8px;align-items:center}
+.tl i{width:12px;height:12px;border-radius:50%;display:block}
+.tl .r{background:#FF5F57}.tl .y{background:#FEBC2E}.tl .g{background:#28C840}
+
+/* 分组卡片 */
+.group-title{font-size:12.5px;font-weight:600;color:#8B939B;margin:0 0 8px 4px}
+.card{background:#fff;border-radius:12px;border:1px solid #ECEEF0;overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:13px 16px;min-height:56px}
+.row + .row{border-top:1px solid #F0F2F4}
+.row .lab{font-size:13.5px;color:#262C33;flex:1}
+.row .ctl{display:flex;align-items:center;gap:14px}
+.pill{display:flex;align-items:center;gap:4px;background:#F4F6F7;border:1px solid #E7EAED;border-radius:8px;height:30px;padding:0 9px;font-size:13px;color:#3C444C;font-variant-numeric:tabular-nums}
+.pill span{color:#98A0A8;font-size:12px;margin-left:1px}
+
+
+</style>
+</head>
+<body>
+<div class="page" style="width:780px;height:920px">
+
+  <div class="cap">
+    <div class="t"><em>08</em>设置页</div>
+    <div class="v">v0.1 Foundation</div>
+  </div>
+  <div class="stage">
+
+    <div class="win" style="width:640px">
+      <div style="padding:14px 18px;border-bottom:1px solid #EDEFF2;display:flex;align-items:center;gap:10px;background:#FCFCFD">
+        <div class="tl"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+        <div style="flex:1;text-align:center;font-size:13.5px;font-weight:600;margin-left:-46px">设置</div>
+      </div>
+      <div style="padding:20px 22px 18px;background:#F7F8F9;display:flex;flex-direction:column;gap:20px">
+        <div>
+          <div class="group-title">提醒</div>
+          <div class="card">
+            <div class="row">
+        <div class="tile t-teal" style="width:28px;height:28px;border-radius:8px"><svg viewBox="0 0 18 18" fill="none"><path d="M3.1 4.9h8.6v6a3.2 3.2 0 0 1-3.2 3.2H6.3A3.2 3.2 0 0 1 3.1 10.9V4.9Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M11.7 6.3h1.3a1.9 1.9 0 0 1 0 3.8h-1.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M6.2 2.4v1.2M8.6 2.1v1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></div>
+        <div class="lab">休息提醒</div>
+        <div class="ctl">
+          <div class="sw on"><i></i></div>
+          <div class="pill num">50<span>分钟</span></div>
+        </div>
+      </div>
+            <div class="row">
+        <div class="tile t-water" style="width:28px;height:28px;border-radius:8px"><svg viewBox="0 0 18 18" fill="none"><path d="M9 2.4c2.5 2.9 4.1 5.1 4.1 7a4.1 4.1 0 1 1-8.2 0c0-1.9 1.6-4.1 4.1-7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></div>
+        <div class="lab">喝水提醒</div>
+        <div class="ctl">
+          <div class="sw on"><i></i></div>
+          <div class="pill num">45<span>分钟</span></div>
+        </div>
+      </div>
+            <div class="row">
+        <div class="tile t-move" style="width:28px;height:28px;border-radius:8px"><svg viewBox="0 0 18 18" fill="none"><circle cx="10.3" cy="3.5" r="1.6" stroke="currentColor" stroke-width="1.5"/><path d="M10.7 6.2 8.1 8.4l1.3 2.2-.8 4.5M10.7 6.2l1.9 2.6 2.1.7M9.4 10.6 5.9 11.1M12.6 8.8l.9 6.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="lab">活动提醒</div>
+        <div class="ctl">
+          <div class="sw on"><i></i></div>
+          <div class="pill num">60<span>分钟</span></div>
+        </div>
+      </div>
+            <div class="row">
+        <div class="tile t-eye" style="width:28px;height:28px;border-radius:8px"><svg viewBox="0 0 18 18" fill="none"><path d="M1.9 9S4.5 4.4 9 4.4 16.1 9 16.1 9 13.5 13.6 9 13.6 1.9 9 1.9 9Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="9" cy="9" r="2.1" stroke="currentColor" stroke-width="1.5"/></svg></div>
+        <div class="lab">护眼提醒</div>
+        <div class="ctl">
+          <div class="sw on"><i></i></div>
+          <div class="pill num">40<span>分钟</span></div>
+        </div>
+      </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="group-title">勿扰</div>
+          <div class="card">
+            <div class="row">
+        <div class="lab">勿扰模式</div>
+        <div class="ctl"><div class="sw"><i></i></div></div>
+      </div>
+            <div class="row">
+        <div class="lab">仅在工作时间提醒<span class="sub" style="font-size:11.5px;margin-left:2px">（v0.2 提供）</span></div>
+        <div class="ctl"><div class="sw"><i></i></div></div>
+      </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="group-title">通用</div>
+          <div class="card">
+            <div class="row">
+        <div class="lab">开机自动启动</div>
+        <div class="ctl"><div class="sw on"><i></i></div></div>
+      </div>
+            <div class="row">
+              <div class="lab">关于 Tacet</div>
+              <div class="ctl">
+                <span class="sub num">v0.1.0</span>
+                <span style="display:flex;width:15px;color:#C4CAD0"><svg viewBox="0 0 18 18" fill="none"><path d="M7 4.5 11.5 9 7 13.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="group-title">AI 助手</div>
+          <div class="card">
+            <div class="row" style="padding:15px 16px">
+              <div style="flex:1;line-height:1.45">
+                <div style="font-size:13.5px;color:#3C444C">AI 助手（可选）</div>
+                <div class="sub" style="font-size:12px;margin-top:2px">不配置也能完整使用 Tacet</div>
+              </div>
+              <div class="ctl">
+                <span style="display:flex;width:15px;color:#C4CAD0"><svg viewBox="0 0 18 18" fill="none"><path d="M7 4.5 11.5 9 7 13.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

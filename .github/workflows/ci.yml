@@ -1,0 +1,360 @@
+name: CI
+
+# 什么时候跑？
+#
+# - 往 main 提 PR：全量检查
+# - 推到 main：全量检查（防止有人绕过 PR 直推）
+#
+# 为什么不限制路径：Tacet 的改动经常是「改一行 Rust 影响前端契约」，
+# 用 paths 过滤反而容易漏掉真正的破坏性改动。CI 一次几分钟，值得。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支连续推送时，取消上一次还在跑的检查 ——
+# 省资源，也让 PR 上的状态更快变绿。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # 让 Rust 编译失败时的报错更易读
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # Rust：格式 + 静态检查 + 测试
+  # ─────────────────────────────────────────────────────────────
+  rust:
+    name: Rust
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: 缓存 Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # 规范 §7：格式必须用 rustfmt 默认配置，CI 必查
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+
+      # 规范 §7：clippy 零警告。`-D warnings` 让任何警告都变成失败，
+      # 避免「先合进去以后再修」变成永远不修。
+      - name: 静态检查
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # 这是主检查项。核心逻辑的测试全部跑在 MockPlatform 上，
+      # 所以不需要真机权限，CI 上也能覆盖到完整的决策链路。
+      - name: 测试
+        run: cargo test --workspace
+
+  # ─────────────────────────────────────────────────────────────
+  # 前端：类型 + 构建
+  # ─────────────────────────────────────────────────────────────
+  frontend:
+    name: 前端
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      # 规范 §7：前端 lint 必查。
+      # 配置里刻意保留了「禁止 any」和「业务真值不得存 localStorage」
+      # 这两条 —— 它们是 §3.2 的约定，靠人记住不如靠规则拦住。
+      - name: Lint
+        run: pnpm --filter @tacet/ui lint
+
+      # `build` 脚本里包含了 `tsc --noEmit`（类型检查）+ vite build。
+      # 类型错误在这一步会直接失败，不需要单独一条命令。
+      - name: 类型检查与构建
+        run: pnpm --filter @tacet/ui build
+
+  # ─────────────────────────────────────────────────────────────
+  # 架构红线（研发规范 §3.3）
+  #
+  # 这些检查都是 grep 级别的 —— 便宜、确定、假阳性极低。
+  # 它们的价值不在于「聪明」，而在于**永远不忘记**：
+  # 人会忘记约定，脚本不会。
+  # ─────────────────────────────────────────────────────────────
+  architecture:
+    name: 架构红线
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── 红线 1：核心 crate 不得出现平台条件编译 ──
+      #
+      # 为什么这条重要：一旦 `tacet-core` 里出现 `#[cfg(target_os = "macos")]`，
+      # 这个 crate 就再也无法在 CI 的 Linux runner 上测，
+      # 「核心可跨平台」这个假设就悄悄失效了。
+      # 平台相关的代码必须待在 platform-macos / platform-windows 里。
+      - name: 红线 1 — 核心 crate 无平台条件编译
+        run: |
+          set -euo pipefail
+          if git grep -n 'cfg(target_os' -- 'crates/' ':!crates/platform-*'; then
+            echo "❌ 核心 crate 里出现了平台条件编译，请把平台相关代码移到 crates/platform-*"
+            exit 1
+          fi
+          echo "✅ 通过"
+
+      # ── 红线 3：不得手写多份版本号 ──
+      #
+      # apps/desktop/build.rs 已经在编译期做了这件事，
+      # 但这里再查一遍是有意义的：有人可能只改前端、根本不编译 Rust。
+      - name: 红线 3 — 版本号单一真值
+        run: |
+          set -euo pipefail
+          CARGO_V=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          CONF_V=$(python3 -c "import json;print(json.load(open('apps/desktop/tauri.conf.json'))['version'])")
+          UI_V=$(python3 -c "import json;print(json.load(open('packages/ui/package.json'))['version'])")
+
+          echo "Cargo.toml:          $CARGO_V"
+          echo "tauri.conf.json:     $CONF_V"
+          echo "packages/ui:         $UI_V"
+
+          if [ "$CARGO_V" != "$CONF_V" ] || [ "$CARGO_V" != "$UI_V" ]; then
+            echo "❌ 版本号不一致（研发规范 §3.3 红线 3）"
+            exit 1
+          fi
+          echo "✅ 通过"
+
+      # ── 红线 5：决策引擎不得调用网络 ──
+      #
+      # 决策引擎必须在**无网络**时也完全可用 —— 这是「本地优先」的底线。
+      # 一旦有人在 policy 里加了 HTTP 调用，产品的可靠性就从
+      # 「永远可用」降级为「取决于网络」，那是根本性的改变。
+      - name: 红线 5 — 决策引擎不联网
+        run: |
+          set -euo pipefail
+          TARGETS="crates/tacet-core/src/policy crates/tacet-health/src apps/desktop/src/state.rs"
+          if git grep -nE 'reqwest|hyper::|ureq|surf::|isahc|TcpStream|UdpSocket|std::net::' -- $TARGETS; then
+            echo "❌ 决策链路里出现了网络调用（研发规范 §3.3 红线 5）"
+            exit 1
+          fi
+          echo "✅ 通过"
+
+      # ── 红线 6：AI 可选性 ──
+      #
+      # 产品原则 7：「不配置任何 AI 服务时，产品依然完整可用」。
+      #
+      # 这条原则最容易在重构中被无声破坏：有人写了个 tacet-agent，
+      # 核心链路就悄悄依赖上它了，而单测全绿 —— 因为测试环境里
+      # agent crate 永远存在。线上用户不配 Key 时才会炸。
+      #
+      # ## 检查方式（两步，缺一不可）
+      #
+      # 1. **依赖图检查**：核心 crate 的 Cargo.toml 里不得出现 agent。
+      #    这一步挡住「直接依赖」。
+      # 2. **删掉后构建**：把 agent crate 整个移走，验证剩下的部分
+      #    仍能完整编译 —— 这一步挡住「间接依赖」。
+      #
+      # 只做第 1 步是不够的：A 依赖 B、B 依赖 agent，第 1 步看不出来。
+      # 只做第 2 步也不够：万一有人只在文档里提了一句，误报很烦。
+      - name: 红线 6 — 摘掉 AI 后仍能构建
+        run: |
+          set -euo pipefail
+
+          AGENT_DIR="crates/tacet-agent"
+
+          # ── 第 1 步：依赖图检查 ──
+          #
+          # 允许的引用只有两处：
+          #   - agent crate 自己的 Cargo.toml
+          #   - 根 Cargo.toml 的 description / 注释
+          # 其它任何地方出现都是违规。
+          echo "── 检查依赖图 ──"
+          VIOLATIONS=$(grep -rn 'tacet-agent' --include='Cargo.toml' . \
+            | grep -v "^\./${AGENT_DIR}/" \
+            | grep -vE '^\S+:[0-9]+:\s*#' \
+            || true)
+
+          if [ -n "$VIOLATIONS" ]; then
+            echo "❌ 有 crate 依赖了 tacet-agent（研发规范 §3.3 红线 6）："
+            echo "$VIOLATIONS"
+            echo
+            echo "核心链路必须能在没有 AI 的情况下独立工作。"
+            echo "如果确实需要 AI，请通过 trait 抽象 + 运行时注入，"
+            echo "而不是在 Cargo.toml 里直接依赖。"
+            exit 1
+          fi
+          echo "✅ 依赖图干净"
+
+          # ── 第 2 步：物理删除后构建 ──
+          echo
+          echo "── 移走 agent crate 后重新构建 ──"
+          if [ ! -d "$AGENT_DIR" ]; then
+            echo "✅ 目录不存在，AI 可选性天然成立"
+            exit 0
+          fi
+
+          mv "$AGENT_DIR" /tmp/tacet-agent-removed
+
+          # 从 workspace members 里摘掉这一行。
+          # 这一步不能省：目录被移走后 members 里还留着它，
+          # `cargo build` 会因为「找不到成员目录」而失败，
+          # 报出一个和 AI 可选性毫无关系的误导性错误。
+          if grep -q 'tacet-agent' Cargo.toml; then
+            sed -i.bak '/tacet-agent/d' Cargo.toml
+          fi
+
+          if cargo build --workspace --all-targets; then
+            echo
+            echo "✅ 摘掉 AI 后完整构建通过 —— 产品原则 7 成立"
+          else
+            echo
+            echo "❌ 摘掉 tacet-agent 后构建失败 —— 核心链路依赖了 AI"
+            echo "   违反产品原则 7 / 研发规范 §3.3 红线 6"
+            exit 1
+          fi
+
+      # ── plist 不能含 XML 注释里的连续减号 ──
+      #
+      # 这是一个真实踩过的坑：`entitlements.plist` 的注释里用 Markdown
+      # 表格写过 `| --- | --- |`。XML 规范**不允许注释内容包含 `--`**，
+      # 而 Apple 的签名工具 AMFI 严格照此执行 ——
+      # 结果是「本地构建一直成功，一签名就报 AMFIUnserializeXML」。
+      #
+      # 更阴险的是 `plutil -lint` 会说这个文件 OK（它比较宽容），
+      # 所以本地怎么查都查不出来。只能靠这条专门的检查。
+      - name: plist 注释合法性
+        run: |
+          set -euo pipefail
+          failed=0
+          found=0
+          # 用 find 而不是 `git ls-files`：后者只列出已被追踪的文件，
+          # 而「新加了一个 plist 但还没 git add」恰恰是最需要检查的时刻。
+          for f in $(find . -name '*.plist' -not -path '*/node_modules/*' -not -path './target/*'); do
+            found=$((found + 1))
+            # 提取注释块，检查其中是否有连续减号
+            if python3 -c "
+import re, sys
+text = open('$f', encoding='utf-8').read()
+bad = [m.group(0)[:40] for m in re.finditer(r'<!--.*?-->', text, re.S) if '--' in m.group(0)[4:-3]]
+sys.exit(1 if bad else 0)
+"; then
+              echo "✅ $f"
+            else
+              echo "❌ $f 的 XML 注释里有连续减号（'--'）"
+              echo "   XML 规范禁止这样做。签名时会报 AMFIUnserializeXML 错误。"
+              failed=1
+            fi
+          done
+
+          # 一个 plist 都没找到是可疑的（entitlements.plist 应该存在），
+          # 说明 find 的路径或过滤条件写错了 —— 这时候「通过」是假通过。
+          if [ "$found" -eq 0 ]; then
+            echo "❌ 没有找到任何 .plist 文件，检查逻辑可能失效了"
+            exit 1
+          fi
+          echo "（共检查 $found 个文件）"
+          exit $failed
+
+      # ── 隐私：不得提交密钥 ──
+      #
+      # 规范 §8：签名证书、API Key 仅存 GitHub Secrets / 本地钥匙串。
+      # 这里的规则刻意写得窄 —— 宽规则（比如「禁止出现长字符串」）
+      # 会因为误报太多而被大家忽略，最后形同虚设。
+      - name: 密钥不入库
+        run: |
+          set -euo pipefail
+
+          # 已知会被误提交的文件名
+          if git ls-files | grep -E '^\.env$|\.env\.[a-z]+$|\.p12$|\.pem$|\.p8$|\.mobileprovision$'; then
+            echo "❌ 疑似密钥/证书文件被提交（研发规范 §8）"
+            exit 1
+          fi
+
+          # 常见密钥的字面量前缀
+          if git grep -nE 'sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}' -- . ':!*.lock' ':!*.md'; then
+            echo "❌ 代码里出现疑似 API Key 字面量（研发规范 §8）"
+            exit 1
+          fi
+
+          echo "✅ 通过"
+
+  # ─────────────────────────────────────────────────────────────
+  # 应用打包（只在 PR 或 main 上跑，验证 Tauri 配置没坏）
+  # ─────────────────────────────────────────────────────────────
+  build-app:
+    name: 应用构建
+    runs-on: macos-14
+    needs: [rust, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      # 只构建 .app，不做 DMG / 签名 ——
+      # 签名的证书在 GitHub Secrets 里，且只该用在发布流程（05-01）中。
+      # CI 的目的是「证明它还能打包」，不是「发布」。
+      #
+      # 这个脚本会依次跑完 beforeBuildCommand（前端构建）+ Rust release 编译 +
+      # 打包 .app，是整条构建链最完整的验证。
+      - name: 构建 Tacet.app
+        run: pnpm app:build
+        env:
+          # Tauri 在没有签名证书时也能构建 .app，这里显式关掉签名
+          APPLE_SIGNING_IDENTITY: "-"
+
+      - name: 确认产物存在
+        run: |
+          set -euo pipefail
+          APP="target/release/bundle/macos/Tacet.app"
+          if [ ! -d "$APP" ]; then
+            echo "❌ 构建声称成功，但没有产出 $APP"
+            exit 1
+          fi
+          echo "✅ $APP"
+          du -sh "$APP"

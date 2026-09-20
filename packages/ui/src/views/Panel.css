@@ -1,0 +1,216 @@
+/**
+ * 菜单栏主面板的样式。
+ *
+ * 面板尺寸参照原型：376px 宽。这个宽度的依据是四张卡片两列布局后
+ * 每张约 172px —— 刚好放得下「距提醒 18 分钟」这样的文案而不换行。
+ */
+
+.panel-shell {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  /* 右上角收窄一点，视觉上「挂」在菜单栏下面 */
+  border-top-right-radius: 8px;
+}
+
+.panel-loading {
+  padding: 40px 22px;
+  text-align: center;
+}
+
+/* ============================================================ 状态头 */
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  padding: 18px 20px 15px;
+  flex: 0 0 auto;
+}
+
+.panel-brand {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.panel-logo {
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  font-size: 15px;
+}
+
+.panel-title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.panel-dnd {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent-neutral);
+  background: rgba(74, 82, 89, 0.09);
+  border-radius: var(--radius-full);
+  padding: 2px 7px;
+  letter-spacing: 0.02em;
+}
+
+.panel-headline {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.15;
+  flex: 0 0 auto;
+}
+
+.panel-headline-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-quaternary);
+}
+
+.panel-headline-value {
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--brand);
+  margin-top: 3px;
+}
+
+/* ============================================================ 四类状态 */
+
+.panel-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 14px;
+  flex: 0 0 auto;
+}
+
+.need-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 13px 14px;
+  border-radius: var(--radius-lg);
+  /* 卡片比面板底稍实一点，才能从毛玻璃上「浮」起来 */
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  /* 内容可能溢出，这里给一个最小高度保证四张卡对齐 */
+  min-height: 58px;
+}
+
+/* 已达标的卡：换成很淡的绿，一眼能扫出「这几项今天ok了」 */
+.need-card-done {
+  background: var(--accent-done-soft);
+  border-color: var(--accent-done-border);
+  box-shadow: none;
+}
+
+.need-card-done .need-card-status {
+  color: var(--accent-done);
+}
+
+/* 快到点的卡：左侧一条细提示条 */
+.need-card-due::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 14px;
+  bottom: 14px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent-neutral);
+  opacity: 0.45;
+}
+
+.need-card {
+  position: relative;
+}
+
+.need-card-body {
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.need-card-name {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: #20262d;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 卡片上那个小动作标签（「+1 杯」「打卡」）——
+   平时很淡，鼠标悬停到卡片上才明显起来，避免面板显得吵闹。 */
+.need-card-action {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--brand);
+  background: var(--brand-soft);
+  border-radius: var(--radius-full);
+  padding: 1px 6px;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out);
+  white-space: nowrap;
+}
+
+.need-card:hover .need-card-action,
+.need-card:focus-visible .need-card-action {
+  opacity: 1;
+}
+
+.need-card-status {
+  margin-top: 1px;
+  font-size: var(--text-sm);
+  color: #8c939b;
+}
+
+/* ============================================================ 操作区 */
+
+.panel-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 4px 14px 16px;
+  flex: 0 0 auto;
+}
+
+.panel-main-action {
+  width: 100%;
+  height: 42px;
+  font-size: 14.5px;
+}
+
+.panel-sub-actions {
+  display: flex;
+  gap: 9px;
+}
+
+.panel-sub-action {
+  flex: 1;
+  height: 38px;
+  background: rgba(11, 13, 16, 0.03);
+}
+
+/* ============================================================ 底部 */
+
+.panel-footer {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 14px 12px;
+  flex: 0 0 auto;
+  margin-top: auto;
+}
+
+.panel-footer-dot {
+  color: #d2d8dd;
+  font-size: var(--text-sm);
+}

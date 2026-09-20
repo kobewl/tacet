@@ -1,0 +1,634 @@
+/**
+ * 全屏休息流程的样式。
+ *
+ * ## 这一屏的视觉目标：让人愿意离开
+ *
+ * 全屏提醒最大的风险是「把人留在屏幕前」—— 用户盯着倒计时，
+ * 等着它走完，而不是真的去休息。所以这里的每个视觉决定都在往反方向使劲：
+ *
+ * - **背景是柔和、无信息的**：没有好看的图表值得研究
+ * - **倒计时数字不大**：够看清，但不足以成为视觉焦点
+ * - **呼吸环幅度只有 5%**：够余光感知，但不吸引注视
+ * - **留白极大**：空的地方在心理上「推」人离开
+ *
+ * ## 背景：为什么是「自己画的玻璃」，而不是 backdrop-filter
+ *
+ * 这里踩过一个坑，值得写下来。
+ *
+ * 最初的设计是 `rgba(255,255,255,.46)` + `backdrop-filter: blur(52px)`，
+ * 想做一层真的能把桌面模糊掉的毛玻璃。但在这套技术栈里**做不到**：
+ * Tauri 的透明窗口就是一个没有背景色的 WKWebView，而 `backdrop-filter`
+ * 能采样到的只有**同一个网页内部**画在它下层的内容 —— 窗口背后的桌面、
+ * 别的应用窗口都不在网页的光栅化范围里，采样不到。
+ *
+ * 结果就是：一点都不模糊，只剩一层 46% 的白粉刷在屏幕上。
+ * 用户仍然看得清自己的代码和浏览器标签，只是所有东西都褪了色 ——
+ * 既不像玻璃，也不像界面，看起来像显示器出了问题。（真实反馈：
+ * 「我的显示器还正常啊，你这弄了个什么啊？」）
+ *
+ * 所以改成**自己画一层柔和的渐变**。色相取自原型的「桌面光源」设计 ——
+ * 那本来就是为毛玻璃提供色彩用的，单独拿出来也是一组好看的色。
+ * 做成不透明之后，无论用户背后开着什么、用哪块显示器，
+ * 这一屏在每台机器上都长得一样：柔和、安静、不提供任何信息。
+ *
+ * 「不提供信息」比「透明」重要得多：看得见背后的代码和标签页，
+ * 就意味着这一屏还在传递信息，而它存在的全部目的是把人从信息里推出去。
+ */
+.break-stage {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+
+  background:
+    radial-gradient(
+      760px 620px at 12% 2%,
+      rgba(213, 232, 240, 0.9) 0%,
+      rgba(213, 232, 240, 0) 62%
+    ),
+    radial-gradient(
+      680px 560px at 88% 10%,
+      rgba(244, 229, 216, 0.85) 0%,
+      rgba(244, 229, 216, 0) 64%
+    ),
+    radial-gradient(
+      840px 720px at 78% 100%,
+      rgba(209, 230, 236, 0.9) 0%,
+      rgba(209, 230, 236, 0) 66%
+    ),
+    radial-gradient(
+      620px 580px at 22% 92%,
+      rgba(229, 224, 243, 0.8) 0%,
+      rgba(229, 224, 243, 0) 68%
+    ),
+    linear-gradient(158deg, #fbfcfe 0%, #f3f7f9 48%, #faf7f3 100%);
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+/**
+ * 呼吸引导环 —— 背景层的那个缓慢搏动的光晕。
+ *
+ * 它做两件事：给这一屏一点「活着」的感觉，以及引导用户的呼吸节奏。
+ * 周期 10 秒（4 秒吸 / 6 秒呼），与下方「吸气 4 秒 / 呼气 6 秒」的文案同步。
+ */
+.break-breathe {
+  position: absolute;
+  width: 620px;
+  height: 620px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(111, 141, 136, 0.1) 0%,
+    rgba(111, 141, 136, 0.05) 45%,
+    transparent 70%
+  );
+  animation: breathe var(--breath-cycle) cubic-bezier(0.42, 0, 0.58, 1) infinite;
+  pointer-events: none;
+}
+
+/**
+ * 呼吸动画：只做 5% 的缩放与透明度变化。
+ *
+ * 为什么幅度这么小：这个环的目的是「被余光看到」，不是「被盯着看」。
+ * 幅度大了会变成视觉干扰，反而把人留在屏幕上 —— 与产品目标相反。
+ */
+@keyframes breathe {
+  0% {
+    transform: scale(1);
+    opacity: 0.45;
+  }
+  40% {
+    transform: scale(1.05);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0.45;
+  }
+}
+
+.break-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 48px;
+}
+
+.break-loading {
+  color: var(--text-tertiary);
+  font-size: var(--text-md);
+}
+
+/* ============================================================ 01 询问 */
+
+.stage-ask {
+  text-align: center;
+  max-width: 520px;
+}
+
+.ask-title {
+  font-size: var(--text-3xl);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+  margin: 0 0 28px;
+  color: var(--text-primary);
+}
+
+/* 「为什么提醒我」的事实清单 */
+.ask-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 40px;
+}
+
+.ask-fact {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: var(--text-md);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.ask-fact-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-rest);
+  flex: 0 0 auto;
+}
+
+.ask-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.ask-primary {
+  min-width: 180px;
+  height: 44px;
+  font-size: 15px;
+  border-radius: var(--radius-lg);
+}
+
+.ask-secondary {
+  display: flex;
+  gap: 9px;
+}
+
+.ask-secondary .btn-quiet {
+  min-width: 92px;
+  height: 36px;
+}
+
+/* 「这次不用」刻意做得很轻 —— 跳过不需要被强调，
+   也不该让用户觉得点它需要勇气。 */
+.ask-skip {
+  margin-top: 6px;
+  color: var(--text-quaternary);
+}
+
+/* ============================================================ 03 Intent */
+
+.stage-intent {
+  max-width: 520px;
+  width: 100%;
+  text-align: center;
+}
+
+.intent-kicker {
+  margin-bottom: 14px;
+}
+
+.intent-title {
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+  margin: 0 0 10px;
+}
+
+.intent-hint {
+  margin-bottom: 26px;
+}
+
+.intent-field {
+  position: relative;
+  margin-bottom: 14px;
+}
+
+.intent-input {
+  width: 100%;
+  height: 52px;
+  padding: 0 18px;
+  font-size: var(--text-lg);
+  text-align: center;
+  border: none;
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.9),
+    var(--shadow-sm);
+  outline: none;
+  transition: box-shadow var(--duration-normal) var(--ease-out);
+}
+
+/* 聚焦时的呼吸光晕：给输入态一个「活的」反馈，
+   但用极慢的节奏（4.2 秒），避免在输入时分散注意力。 */
+.intent-input:focus {
+  animation: fieldBreath 4.2s ease-in-out infinite;
+}
+
+@keyframes fieldBreath {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 0 0 1px rgba(12, 110, 102, 0.18),
+      0 0 0 4px rgba(12, 110, 102, 0.05);
+  }
+  50% {
+    box-shadow:
+      inset 0 0 0 1px rgba(12, 110, 102, 0.3),
+      0 0 0 7px rgba(12, 110, 102, 0.08);
+  }
+}
+
+.intent-input::placeholder {
+  color: var(--text-faint);
+}
+
+/* 光标：用 CSS 画一条会闪的竖线。
+   真实 input 的光标在截图与录屏里经常拍不到，这里补一条更稳定的视觉。 */
+.intent-caret {
+  position: absolute;
+  right: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1.5px;
+  height: 22px;
+  background: var(--brand);
+  opacity: 0;
+  animation: blink 1.06s steps(1, end) infinite;
+  pointer-events: none;
+}
+
+.intent-input:focus + .intent-caret,
+.intent-input:not(:placeholder-shown) + .intent-caret {
+  opacity: 1;
+}
+
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.intent-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.intent-buttons {
+  display: flex;
+  gap: 9px;
+}
+
+.intent-over {
+  color: #b4553f;
+}
+
+/* ============================================================ 02 休息中 */
+
+.stage-resting {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.resting-kicker {
+  margin-bottom: 14px;
+}
+
+.resting-ring-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 22px;
+}
+
+.resting-ring {
+  transform: rotate(-90deg); /* 让进度从 12 点方向开始 */
+}
+
+.resting-ring-track {
+  fill: none;
+  stroke: rgba(11, 13, 16, 0.06);
+  stroke-width: 2;
+}
+
+.resting-ring-progress {
+  fill: none;
+  stroke: var(--accent-rest);
+  stroke-width: 2;
+  stroke-linecap: round;
+  /* 匀速收缩 —— 它回答的是「还剩多久」，不是装饰 */
+  transition: stroke-dashoffset 1s linear;
+}
+
+.resting-center {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.resting-count {
+  /* 比 --text-display（52px）大一档：环放大到 260px 之后，
+     52px 的数字在里面会显得空。这个尺寸仍然不构成视觉焦点
+     —— 见本文件开头那段关于「不吸引注视」的说明。 */
+  font-size: 68px;
+  font-weight: 200;
+  letter-spacing: -0.03em;
+  color: var(--text-primary);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.resting-total {
+  margin-top: 8px;
+  font-size: var(--text-sm);
+}
+
+/* 呼吸提示文案：4 秒转换一次，用极淡的过渡避免突兀 */
+.resting-breathe-hint {
+  font-size: var(--text-md);
+  color: var(--accent-rest);
+  letter-spacing: var(--tracking-wide);
+  margin-bottom: 26px;
+  transition: opacity var(--duration-slow) var(--ease-out);
+}
+
+/* ---------------------------------------------------------- 行动清单 */
+
+/**
+ * 行动清单卡片。
+ *
+ * 它是这一屏唯一「有信息量」的东西，所以给它玻璃卡片的质感，
+ * 让它在柔和的背景上浮起来 —— 用户的余光扫过去时，
+ * 只有这三行字是有形的，其余都是虚的。视线落点因此只有一个，
+ * 而且是「该干什么」，不是「还剩多久」。
+ */
+.resting-card {
+  width: 344px;
+  border-radius: var(--radius-2xl);
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.86);
+  box-shadow:
+    0 20px 50px -24px rgba(15, 23, 32, 0.18),
+    0 2px 8px -4px rgba(15, 23, 32, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  overflow: hidden;
+  text-align: left;
+}
+
+.resting-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+}
+
+/* 清单里的图标底座比主面板的稍大：这一屏留白多，
+   小图标会显得单薄，撑不住整块卡片的视觉重量。 */
+.resting-row .tile {
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+}
+
+.resting-row .tile svg {
+  width: 18px;
+  height: 18px;
+}
+
+.resting-row-text {
+  line-height: 1.4;
+}
+
+.resting-row-label {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: -0.008em;
+}
+
+.resting-row-sub {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+
+/* 分隔线从文字起始处开始，不横穿图标 —— 这样三行读起来是一个列表，
+   而不是三段各自独立的卡片。 */
+.resting-hair {
+  height: 1px;
+  background: var(--border-soft);
+  margin-left: 66px;
+}
+
+/* ---------------------------------------------------------- 那句话 */
+
+/**
+ * 休息时那句话的占位容器。
+ *
+ * 必须**始终存在**（哪怕里面还没有内容），否则 10 秒后句子出现的一刻，
+ * 整个画面会往上一跳 —— 在这么一个安静的界面上，跳动比没有句子更糟。
+ */
+.resting-quote-slot {
+  width: 460px;
+  min-height: 46px;
+  margin-top: 30px;
+}
+
+/**
+ * 那句话本身。
+ *
+ * 字号与对比度都压到最低，因为它是「可看可不看」的点缀：
+ * 看了会心一笑，不看也不缺什么。给它更重的视觉分量就等于
+ * 承认这一屏有内容可读 —— 那正是我们要避免的。
+ */
+.resting-quote {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.66;
+  color: #6b737b;
+  letter-spacing: 0.004em;
+  animation: quoteIn var(--duration-slow) var(--ease-out) both;
+}
+
+/* 换句时的淡入：4px 的位移足够让人察觉「换了一句」，又不足以成为动效 */
+@keyframes quoteIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 休息中的出口：放在底部中央，很轻，但始终可见 */
+.break-exit {
+  position: absolute;
+  bottom: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--text-quaternary);
+}
+
+/**
+ * 角落的「Esc 关闭」提示。
+ *
+ * 存在的意义是「可发现性」：键盘逃生通道如果没有提示，
+ * 用户根本不知道它存在 —— 那这道保险就等于没有。
+ *
+ * 但它必须**极轻**：这一屏的视觉目标是让人离开屏幕，
+ * 一个显眼的提示反而会吸引注视。所以做了三件事压它的存在感：
+ * 极小的字号、很淡的颜色、贴着屏幕角落。
+ * 平时余光扫不到，但用户产生「怎么关掉」这个念头去找的时候，
+ * 一眼就能看到。
+ */
+.break-esc-hint {
+  position: absolute;
+  right: 28px;
+  bottom: 24px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-quaternary);
+  opacity: 0.55;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ============================================================ 04 结束 */
+
+.stage-done {
+  text-align: center;
+  max-width: 560px;
+}
+
+.done-kicker {
+  margin-bottom: 20px;
+}
+
+.done-lead {
+  font-size: var(--text-md);
+  color: var(--text-secondary);
+  margin: 0 0 16px;
+}
+
+.done-lead-solo {
+  font-size: var(--text-lg);
+  color: var(--text-secondary);
+  line-height: var(--leading-relaxed);
+  margin-bottom: 32px;
+}
+
+/* Intent 卡片 —— 这一屏的主角，所以给它最大的字号和最强的对比。
+   用户回来第一眼就该看到它，不需要找。 */
+.done-intent {
+  display: inline-block;
+  font-size: var(--text-2xl);
+  font-weight: 500;
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-primary);
+  line-height: var(--leading-tight);
+  padding: 18px 26px;
+  border-radius: var(--radius-xl);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.9),
+    var(--shadow-md);
+  margin-bottom: 36px;
+  max-width: 100%;
+  word-break: break-word;
+}
+
+.done-button {
+  min-width: 140px;
+  height: 40px;
+  border-radius: var(--radius-lg);
+}
+
+/* ============================================================ 崩溃兜底 */
+
+/**
+ * 渲染失败时的替代界面。
+ *
+ * 它出现在最糟糕的时刻（界面坏了），所以第一目标是**清楚**，
+ * 不是好看：一句人话说明发生了什么，一个明显的出口。
+ * 不留任何装饰性内容 —— 用户此刻需要的是「怎么关掉」，
+ * 而不是欣赏设计。
+ */
+.crash-fallback {
+  max-width: 420px;
+  text-align: center;
+}
+
+.crash-text {
+  margin: 16px 0 28px;
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
+  color: var(--text-secondary);
+}
+
+.crash-hint {
+  margin-top: 14px;
+}
+
+/* ============================================================ 减少动态效果 */
+
+@media (prefers-reduced-motion: reduce) {
+  .break-breathe {
+    animation: none;
+    opacity: 0.6;
+  }
+
+  .intent-input:focus {
+    animation: none;
+    box-shadow:
+      inset 0 0 0 1px rgba(12, 110, 102, 0.3),
+      0 0 0 4px rgba(12, 110, 102, 0.08);
+  }
+
+  .intent-caret {
+    animation: none;
+    opacity: 1;
+  }
+
+  .resting-ring-progress {
+    transition: none;
+  }
+
+  .resting-breathe-hint {
+    transition: none;
+  }
+}

@@ -1,0 +1,1547 @@
+//! 应用状态 —— 所有业务真值的持有者。
+//!
+//! ## 为什么用一个 `Mutex` 包住所有东西
+//!
+//! 有两个线程会同时访问这些状态：
+//!
+//! - **后台调度线程**：每 10 秒 tick 一次，更新状态机、算需求、做决策
+//! - **界面线程**：用户点按钮时读写
+//!
+//! 最简单的正确做法就是一把锁。为什么不上更精细的锁：我们的操作是
+//! 「每 10 秒做几十微秒的计算」和「用户偶尔点一下」——
+//! 争用概率极低，而拆分锁带来的复杂度（死锁可能性、状态不一致窗口）
+//! 是实打实的。**简单且正确，胜过精巧且需要论证。**
+//!
+//! ## 一次 tick 做什么
+//!
+//! ```text
+//!   ① 采样上下文      platform → ContextSnapshot
+//!   ② 推进状态机      idle_seconds → WorkClock（含空闲/休眠判定）
+//!   ③ 读历史          storage → 距上次喝水/活动/休息多久
+//!   ④ 算需求          health → HealthNeeds（四维分数 0~1）
+//!   ⑤ 判时机          health::window → 现在适合打扰吗
+//!   ⑥ 做决策          policy → InterventionDecision
+//!   ⑦ 执行 + 记录     通知/Overlay + 写库
+//! ```
+//!
+//! 这条链路是单向的，且每一步都能被单独测试（架构原则 3、5）。
+
+use std::sync::{Mutex, MutexGuard};
+
+use tacet_context::ContextEngine;
+use tacet_core::event::EventBus;
+use tacet_core::model::BehaviorKind;
+use tacet_core::model::{InterventionLevel, InterventionOutcome, NeedKind, Reason};
+use tacet_core::policy::{DecisionInput, InterventionDecision, PolicyEngine, RecentHistory};
+use tacet_core::state::{WorkClock, WorkInput, WorkState};
+use tacet_core::time::{Timestamp, MINUTE};
+use tacet_health::need::{NeedCalculator, NeedInputs};
+use tacet_health::window::WindowPolicy;
+use tacet_platform::{Platform, PlatformError};
+use tacet_storage::repo::{EventRepo, IntentRepo, InterventionRepo, SettingsRepo};
+use tacet_storage::{Database, LocalOffset};
+
+/// 一次 tick 的产物 —— 告诉调用方「这次需要做点什么」。
+#[derive(Debug, Clone, PartialEq)]
+pub enum TickOutcome {
+    /// 什么都不用做。
+    Quiet,
+    /// 需要发出一次干预。
+    Intervene(Box<InterventionDecision>),
+}
+
+/// 壳层的全部可变状态。
+pub struct AppState {
+    /// 平台能力（macOS 实现或测试替身）。
+    pub platform: Box<dyn Platform>,
+    /// 数据库。
+    pub db: Database,
+    /// 事件总线。
+    pub bus: EventBus,
+    /// 工作状态机。
+    pub clock: WorkClock,
+    /// 上下文引擎。
+    pub context: ContextEngine,
+    /// 需求计算器。
+    pub calculator: NeedCalculator,
+    /// 决策引擎。
+    pub policy: PolicyEngine,
+    /// 时机窗口策略。
+    pub window_policy: WindowPolicy,
+    /// 本机时区偏移（统计口径用）。
+    pub offset: LocalOffset,
+    /// 最近一次决策（界面展示「为什么」）。
+    pub last_decision: Option<InterventionDecision>,
+    /// 最近一次干预记录的 id（用户响应时要用）。
+    pub last_intervention_id: Option<i64>,
+    /// 最近一次真正打扰的时间（安静期判断用）。
+    pub last_interruption_at: Option<Timestamp>,
+    /// 本次休息的结束时刻；不在休息中时为 `None`。
+    pub break_ends_at: Option<Timestamp>,
+    /// 用户延后到什么时候之前都不再打扰；没有延后时为 `None`。
+    ///
+    /// 与 `break_ends_at` 是两回事：前者是「用户正在休息，休息本身有结束时刻」，
+    /// 后者是「用户拒绝了这次提醒，说稍后再说」。
+    pub snooze_until: Option<Timestamp>,
+    /// 用户手动暂停计时（「我离开一会儿」）。
+    pub paused: bool,
+}
+
+impl AppState {
+    /// 建立应用状态：打开数据库、读取设置、初始化各引擎。
+    pub fn new(platform: Box<dyn Platform>) -> Result<Self, StateError> {
+        let db = Database::open_default()?;
+        let prefs = SettingsRepo::load_preferences(&db)?;
+
+        let now = Timestamp::now();
+        let idle_threshold_ms = prefs.idle_threshold_seconds() as i64 * 1000;
+
+        Ok(Self {
+            platform,
+            db,
+            bus: EventBus::new(),
+            clock: WorkClock::new(now, idle_threshold_ms),
+            context: ContextEngine::new(),
+            calculator: NeedCalculator::new(),
+            policy: PolicyEngine::new(),
+            window_policy: WindowPolicy::new(),
+            offset: local_offset(),
+            last_decision: None,
+            last_intervention_id: None,
+            last_interruption_at: None,
+            break_ends_at: None,
+            snooze_until: None,
+            paused: false,
+        })
+    }
+
+    /// 供测试使用：用内存数据库建一个干净的状态。
+    #[cfg(test)]
+    pub fn in_memory(platform: Box<dyn Platform>) -> Result<Self, StateError> {
+        let db = Database::open_in_memory()?;
+        let now = Timestamp::now();
+
+        Ok(Self {
+            platform,
+            db,
+            bus: EventBus::new(),
+            clock: WorkClock::new(now, 5 * MINUTE),
+            context: ContextEngine::new(),
+            calculator: NeedCalculator::new(),
+            policy: PolicyEngine::new(),
+            window_policy: WindowPolicy::new(),
+            offset: LocalOffset::utc(),
+            last_decision: None,
+            last_intervention_id: None,
+            last_interruption_at: None,
+            break_ends_at: None,
+            snooze_until: None,
+            paused: false,
+        })
+    }
+
+    /// 用户偏好（每次都从库里读，保证与设置页的改动一致）。
+    pub fn preferences(&self) -> Result<tacet_core::model::UserPreferences, StateError> {
+        Ok(SettingsRepo::load_preferences(&self.db)?)
+    }
+
+    /// 当前工作状态。
+    pub fn work_state(&self) -> WorkState {
+        self.clock.state()
+    }
+
+    /// 连续工作了多久（分钟）。
+    pub fn continuous_work_minutes(&self) -> u32 {
+        (self.clock.continuous_work_ms() / MINUTE) as u32
+    }
+
+    /// 收集最近发生过什么（决策的「记忆」部分）。
+    pub fn recent_history(&self, now: Timestamp) -> Result<RecentHistory, StateError> {
+        // 延后是否还有效：只把「还没到期」的延后传下去。
+        //
+        // 如果用户在 10 分钟前选了「3 分钟后」，现在早就该重新提醒了；
+        // 传一个已经过去的时刻会让决策引擎永远保持安静 ——
+        // 那是「提醒莫名其妙不再出现」这类 bug 的典型来源。
+        let snoozed_until = self.snooze_until.filter(|until| now < *until);
+
+        Ok(RecentHistory {
+            last_intervention: InterventionRepo::last_disturbing(&self.db)?.map(|record| {
+                tacet_core::policy::InterventionRecap {
+                    kind: record.kind,
+                    level: record.level,
+                    fired_at: record.fired_at,
+                }
+            }),
+            last_break_completed_at: EventRepo::last_occurrence(
+                &self.db,
+                BehaviorKind::BreakCompleted,
+            )?,
+            last_water_logged_at: EventRepo::last_occurrence(&self.db, BehaviorKind::WaterLogged)?,
+            last_activity_logged_at: EventRepo::last_occurrence(
+                &self.db,
+                BehaviorKind::ActivityLogged,
+            )?,
+            last_eye_rest_logged_at: EventRepo::last_occurrence(
+                &self.db,
+                BehaviorKind::EyeRestLogged,
+            )?,
+            snoozed_until,
+        })
+    }
+
+    /// 算一次四类需求。
+    pub fn needs(&self, now: Timestamp) -> Result<tacet_core::model::HealthNeeds, StateError> {
+        let prefs = self.preferences()?;
+
+        let inputs = NeedInputs {
+            now,
+            continuous_work_minutes: self.continuous_work_minutes(),
+            last_break_completed_at: EventRepo::last_occurrence(
+                &self.db,
+                BehaviorKind::BreakCompleted,
+            )?,
+            last_water_logged_at: EventRepo::last_occurrence(&self.db, BehaviorKind::WaterLogged)?,
+            last_activity_logged_at: EventRepo::last_occurrence(
+                &self.db,
+                BehaviorKind::ActivityLogged,
+            )?,
+            last_eye_rest_logged_at: EventRepo::last_occurrence(
+                &self.db,
+                BehaviorKind::EyeRestLogged,
+            )?,
+            settings: prefs.reminders,
+        };
+
+        Ok(self.calculator.needs(&inputs))
+    }
+
+    /// 工作状态发生变化时的统一处理：广播事件 + 落库。
+    ///
+    /// ## 为什么状态变化必须落库
+    ///
+    /// 今日统计里的「累计工作」「最长连续」都建立在 `work.started` /
+    /// `work.paused` 这两类事件上（数据模型 §3.1 的 `events.kind` 里
+    /// 明确列了它们）。如果只发到事件总线而不写库，`events` 表永远是空的，
+    /// 界面上的今日统计就永远是 0。
+    ///
+    /// ## 为什么不会把数据库写爆
+    ///
+    /// 状态机的 `handle` 只在**真的切换了状态**时才返回 `Some`，
+    /// 所以这里一天只会写几十条记录（每次离开、回来各一条），
+    /// 而不是每 10 秒一条。这与「高频观测不落库」的原则不冲突。
+    fn on_work_state_changed(
+        &mut self,
+        from: WorkState,
+        to: WorkState,
+        now: Timestamp,
+    ) -> Result<(), StateError> {
+        // 只有「开始工作」和「停止工作」两件事值得记。
+        // Idle -> Working 与 Away -> Working 都算开始工作；
+        // Working -> Away 与 Working -> Idle 都算停止。
+        let (behavior, payload) = match to {
+            WorkState::Working => (
+                Some(BehaviorKind::WorkStarted),
+                tacet_core::event::EventPayload::UserReturned,
+            ),
+            WorkState::Away => (
+                Some(BehaviorKind::WorkPaused),
+                tacet_core::event::EventPayload::UserIdleStarted,
+            ),
+            // 进入休息由 start_break 负责记录，这里不重复。
+            // Idle 只是「还没开始」，不是一个值得记的事件。
+            WorkState::Breaking | WorkState::Idle => {
+                (None, tacet_core::event::EventPayload::UserIdleEnded)
+            }
+        };
+
+        if let Some(kind) = behavior {
+            // 带上来源状态，方便将来复盘「这段时间是怎么被切分的」
+            EventRepo::append(
+                &self.db,
+                kind,
+                &format!("{{\"from\":\"{}\"}}", from.as_str()),
+                now,
+            )?;
+        }
+
+        self.bus.emit(tacet_core::event::Event::new(
+            now,
+            tacet_core::event::EventSource::Context,
+            payload,
+        ));
+
+        Ok(())
+    }
+
+    /// 执行一次完整的 tick。
+    ///
+    /// 这是整个应用的心跳。返回 [`TickOutcome`] 而不是直接发通知，
+    /// 是为了让调度线程决定「怎么执行」，而状态层只管「该不该执行」——
+    /// 这样这个函数可以被完整地单元测试。
+    pub fn tick(&mut self, now: Timestamp) -> Result<TickOutcome, StateError> {
+        // ① 采样上下文
+        let context = self.context.sample(self.platform.as_ref(), now);
+
+        // ② 推进状态机
+        let idle_seconds = context.idle_seconds;
+        if let Some(change) = self.clock.handle(WorkInput::Observe { idle_seconds }, now) {
+            self.on_work_state_changed(change.from, change.to, now)?;
+        }
+
+        // 用户在暂停中：不做任何决策（但计时状态照常维护）
+        if self.paused {
+            return Ok(TickOutcome::Quiet);
+        }
+
+        // 休息到点了：自动结束
+        //
+        // 这里记一条日志，理由和 `commands::end_break` 那条一样：
+        // 「休息怎么结束的」有两条路径（tick 到点收的 vs 用户主动结束），
+        // 排查方向完全相反。用户报「自己就结束了」时，
+        // 日志里这条「休息到点」就是自动路径的直接证据。
+        if let Some(ends_at) = self.break_ends_at {
+            if now >= ends_at {
+                let overtime_ms = now.millis_since(ends_at).max(0);
+                crate::logging::info(&format!(
+                    "休息到点，自动结束（超时 {overtime_ms} ms，说明 tick 间隔正常）"
+                ));
+                self.finish_break(now)?;
+                return Ok(TickOutcome::Quiet);
+            }
+        }
+
+        // ③④ 读历史 + 算需求
+        let recent = self.recent_history(now)?;
+        let prefs = self.preferences()?;
+        let needs = self.needs(now)?;
+
+        // ⑤ 判时机
+        let (_, top_score) = needs.highest();
+        let urgent = top_score.get() >= 0.95;
+
+        let window = self.window_policy.evaluate(
+            now,
+            &context,
+            self.last_interruption_at,
+            prefs.idle_threshold_seconds(),
+            urgent,
+        );
+
+        if !window.is_open {
+            // 窗口关着：记一条「为什么不说话」的决策，但等级为静默。
+            //
+            // 为什么连静默决策也记？因为「为什么刚才没提醒我」是一个
+            // 真实会被问到的问题。有了这条记录才能回答它。
+            let kind = needs.highest().0;
+            self.last_decision = Some(InterventionDecision {
+                kind,
+                level: InterventionLevel::Silent,
+                reasons: vec![match window.closed_reason {
+                    Some(tacet_health::window::WindowClosedReason::Away) => Reason::UserAway,
+                    Some(tacet_health::window::WindowClosedReason::Night) => {
+                        Reason::ContextUnavailable
+                    }
+                    Some(tacet_health::window::WindowClosedReason::JustInterrupted) => {
+                        Reason::RateLimited {
+                            kind,
+                            minutes_ago: self
+                                .last_interruption_at
+                                .map(|at| now.minutes_since(at).max(0) as u32)
+                                .unwrap_or(0),
+                        }
+                    }
+                    None => Reason::ContextUnavailable,
+                }],
+                actions: Vec::new(),
+                fused: Vec::new(),
+            });
+            return Ok(TickOutcome::Quiet);
+        }
+
+        // ⑥ 做决策
+        let decision = self.policy.decide(&DecisionInput {
+            now,
+            context,
+            needs,
+            preferences: prefs,
+            recent,
+            is_breaking: self.work_state() == WorkState::Breaking,
+            continuous_work_minutes: self.continuous_work_minutes(),
+        });
+
+        self.last_decision = Some(decision.clone());
+
+        if decision.level == InterventionLevel::Silent {
+            return Ok(TickOutcome::Quiet);
+        }
+
+        // ⑦ 记录这次干预（执行由调用方完成）
+        let record = decision.to_intervention(now);
+        let id = InterventionRepo::insert(&self.db, &record)?;
+
+        self.last_intervention_id = Some(id);
+        self.last_interruption_at = Some(now);
+
+        self.bus.emit(tacet_core::event::Event::new(
+            now,
+            tacet_core::event::EventSource::Policy,
+            tacet_core::event::EventPayload::InterventionFired {
+                kind: decision.kind,
+                level: decision.level,
+            },
+        ));
+
+        Ok(TickOutcome::Intervene(Box::new(decision)))
+    }
+
+    /// 记录一次用户行为（喝水 / 活动 / 远眺）。
+    pub fn log_behavior(&mut self, kind: BehaviorKind, now: Timestamp) -> Result<(), StateError> {
+        EventRepo::append(&self.db, kind, "{}", now)?;
+
+        self.bus.emit(tacet_core::event::Event::new(
+            now,
+            tacet_core::event::EventSource::Ui,
+            match kind {
+                BehaviorKind::WaterLogged => tacet_core::event::EventPayload::WaterLogged,
+                BehaviorKind::ActivityLogged => tacet_core::event::EventPayload::ActivityLogged,
+                BehaviorKind::EyeRestLogged => tacet_core::event::EventPayload::EyeRestLogged,
+                _ => tacet_core::event::EventPayload::ActivityLogged,
+            },
+        ));
+
+        // 记录行为也算「用户回应了提醒」：如果刚才有一条待响应的干预，
+        // 并且类型对得上，就把它标成已完成。
+        if let Some(id) = self.last_intervention_id.take() {
+            let matching = match kind {
+                BehaviorKind::WaterLogged => NeedKind::Hydration,
+                BehaviorKind::ActivityLogged => NeedKind::Movement,
+                BehaviorKind::EyeRestLogged => NeedKind::EyeRest,
+                _ => NeedKind::Rest,
+            };
+
+            let should_resolve = self
+                .last_decision
+                .as_ref()
+                .is_some_and(|decision| decision.kind == matching);
+
+            if should_resolve {
+                InterventionRepo::resolve(&self.db, id, InterventionOutcome::Completed, None, now)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 开始一次休息。
+    ///
+    /// ## 幂等保护：已经在休息中就直接返回
+    ///
+    /// 这个方法有两条调用路径（界面上点「现在休息」、提交 Intent 之后
+    /// 真正进入休息，见 `BreakFlow.tsx`），IPC 命令本身也可以被直接调用。
+    ///
+    /// 没有保护的话，第二次调用会：
+    /// - 重复写入 `break.started` 事件 → 「今天休息了几次」这类统计被算多
+    /// - 重置 `break_ends_at` → 用户在 Intent 页面花的时间被「退回」，
+    ///   实际休息时长超出设置值
+    ///
+    /// 已经在休息中时什么都不做，是最符合直觉的语义 ——
+    /// 重复点「开始休息」不该有任何副作用。
+    pub fn start_break(&mut self, now: Timestamp) -> Result<(), StateError> {
+        if self.clock.state() == WorkState::Breaking {
+            return Ok(());
+        }
+
+        let prefs = self.preferences()?;
+        let duration_ms = prefs.break_duration_ms();
+
+        // 先记一条「工作暂停」—— 休息的起点就是这一段连续工作的终点。
+        // 今日统计里的「最长连续工作」正是靠这对事件算出来的
+        //（见 scheduler::compute_longest_streak），漏了这条会让那项统计失真。
+        if self.clock.state() == WorkState::Working {
+            EventRepo::append(
+                &self.db,
+                BehaviorKind::WorkPaused,
+                &format!("{{\"from\":\"{}\"}}", WorkState::Working.as_str()),
+                now,
+            )?;
+        }
+
+        self.clock.handle(WorkInput::StartBreak, now);
+        self.break_ends_at = Some(now.saturating_add_millis(duration_ms));
+
+        EventRepo::append(&self.db, BehaviorKind::BreakStarted, "{}", now)?;
+
+        self.bus.emit(tacet_core::event::Event::new(
+            now,
+            tacet_core::event::EventSource::Ui,
+            tacet_core::event::EventPayload::BreakStarted,
+        ));
+
+        Ok(())
+    }
+
+    /// 结束一次休息（正常结束或用户提前退出）。
+    ///
+    /// 返回这次休息期间记录的 Intent（如果有一条尚未恢复的），
+    /// 由界面负责展示。
+    ///
+    /// ## 为什么 `clock.handle` 的返回值一定要接住
+    ///
+    /// `WorkClock::handle` 返回的是 [`StateChange`]（状态真的变了才有值），
+    /// 而「写事件 + 广播」的活儿挂在 [`Self::on_work_state_changed`] 上。
+    /// 早期这里写的是 `self.clock.handle(...)`，返回值被丢掉 ——
+    /// 状态机确实回到了 Working，但**一条 `work.started` 都没落库**。
+    ///
+    /// 这个疏漏不会让界面立刻出错，所以它藏了很久，直到查数据库时发现
+    /// `break.completed` 后面直接跟着下一次 `work.started {"from":"idle"}`，
+    /// 中间少了一条本该由休息结束产生的事件。
+    ///
+    /// 代价落在统计上：`compute_longest_streak` 靠 `work.started` 划分工作
+    /// 区间，缺一条就把「休息前」和「休息后」两段糊成一段，
+    /// 今日的「最长连续工作」会系统性偏大。
+    pub fn finish_break(
+        &mut self,
+        now: Timestamp,
+    ) -> Result<Option<tacet_core::model::Intent>, StateError> {
+        if let Some(change) = self.clock.handle(WorkInput::EndBreak, now) {
+            self.on_work_state_changed(change.from, change.to, now)?;
+        }
+        self.break_ends_at = None;
+
+        EventRepo::append(&self.db, BehaviorKind::BreakCompleted, "{}", now)?;
+
+        // 把最近一条未恢复的 Intent 标成已恢复，并返回给界面
+        let intent = match IntentRepo::latest_unrestored(&self.db)? {
+            Some(intent) => {
+                if let Some(id) = intent.id {
+                    IntentRepo::mark_restored(&self.db, id, now)?;
+                }
+                self.bus.emit(tacet_core::event::Event::new(
+                    now,
+                    tacet_core::event::EventSource::Ui,
+                    tacet_core::event::EventPayload::IntentRestored {
+                        id: id_intent(&intent),
+                    },
+                ));
+                Some(intent)
+            }
+            None => None,
+        };
+
+        // 完成一次休息也算回应了「休息」这个需求
+        if let Some(id) = self.last_intervention_id.take() {
+            let was_rest = self
+                .last_decision
+                .as_ref()
+                .is_some_and(|decision| decision.kind == NeedKind::Rest);
+            if was_rest {
+                InterventionRepo::resolve(&self.db, id, InterventionOutcome::Completed, None, now)?;
+            }
+        }
+
+        Ok(intent)
+    }
+
+    /// 用户跳过这次休息。
+    ///
+    /// ## 为什么这里也要动状态机
+    ///
+    /// 多数情况下这个方法是安全的空操作：跳过发生在「询问」阶段，
+    /// 那时用户还没真正开始休息，状态机处于 Working，
+    /// `EndBreak` 从 Working 到 Working 不会产生任何变化。
+    ///
+    /// 但它**可以被在休息开始之后调用**（比如用户先点了「现在休息」，
+    /// 之后又想跳过）。早期版本在这里只清 `break_ends_at`、不碰状态机，
+    /// 结果是状态**永远卡在 Breaking**：
+    ///
+    /// - `WorkClock` 在 Breaking 态不累计工作计时
+    /// - `observe` 里有一条「休息中不因为人离开而改变状态」的保护，
+    ///   连「人离开」都救不回来
+    ///
+    /// 而 `break_ends_at` 已经被清空，tick 里的「到点自动结束」也永远不会
+    /// 触发（它需要 `break_ends_at` 有值）。用户看到的是**计时再也不走了**。
+    ///
+    /// 所以这里显式地把状态机推回 Working，代价只是一次无副作用的调用。
+    pub fn skip_break(&mut self, now: Timestamp) -> Result<(), StateError> {
+        EventRepo::append(&self.db, BehaviorKind::BreakSkipped, "{}", now)?;
+
+        if let Some(id) = self.last_intervention_id.take() {
+            InterventionRepo::resolve(&self.db, id, InterventionOutcome::Skipped, None, now)?;
+        }
+
+        if let Some(change) = self.clock.handle(WorkInput::EndBreak, now) {
+            self.on_work_state_changed(change.from, change.to, now)?;
+        }
+        self.break_ends_at = None;
+        Ok(())
+    }
+
+    /// 用户延后这次提醒。
+    pub fn snooze(&mut self, minutes: u32, now: Timestamp) -> Result<(), StateError> {
+        EventRepo::append(
+            &self.db,
+            BehaviorKind::BreakSnoozed,
+            &format!("{{\"minutes\":{minutes}}}"),
+            now,
+        )?;
+
+        if let Some(id) = self.last_intervention_id.take() {
+            InterventionRepo::resolve(
+                &self.db,
+                id,
+                InterventionOutcome::Snoozed,
+                Some(minutes),
+                now,
+            )?;
+        }
+
+        // 延后期间不打扰 —— 记下延后到什么时候。
+        //
+        // 这里用专门的 `snooze_until` 字段，而不是去拨动
+        // `last_interruption_at`。后者是个 hack：那样会让「上次打扰是在
+        // 几分钟前」这个事实被篡改，而这个事实还要用于限流判断和界面显示。
+        self.snooze_until = Some(now.saturating_add_millis(minutes as i64 * MINUTE));
+
+        Ok(())
+    }
+
+    /// 暂停 / 恢复计时。
+    ///
+    /// 返回 `Err` 只可能来自写库失败 —— 计时状态的切换本身不会失败。
+    pub fn set_paused(&mut self, paused: bool, now: Timestamp) -> Result<(), StateError> {
+        self.paused = paused;
+
+        // 暂停 = 主动离开：结束当前这一段连续工作。
+        // 「用户按了暂停」和「用户离开电脑」在产品上是一回事 ——
+        // 这段离开时间不该被算进连续工作时长。
+        let input = if paused {
+            WorkInput::Sleep
+        } else {
+            WorkInput::Wake
+        };
+
+        if let Some(change) = self.clock.handle(input, now) {
+            self.on_work_state_changed(change.from, change.to, now)?;
+        }
+
+        Ok(())
+    }
+
+    /// 系统即将休眠。
+    pub fn on_sleep(&mut self, now: Timestamp) -> Result<(), StateError> {
+        if let Some(change) = self.clock.handle(WorkInput::Sleep, now) {
+            self.on_work_state_changed(change.from, change.to, now)?;
+        }
+        Ok(())
+    }
+
+    /// 系统唤醒。
+    pub fn on_wake(&mut self, now: Timestamp) -> Result<(), StateError> {
+        if let Some(change) = self.clock.handle(WorkInput::Wake, now) {
+            self.on_work_state_changed(change.from, change.to, now)?;
+        }
+        Ok(())
+    }
+
+    /// 剩下的休息时间（秒）；不在休息中时为 `None`。
+    pub fn break_remaining_seconds(&self, now: Timestamp) -> Option<u32> {
+        let ends_at = self.break_ends_at?;
+        let remaining = ends_at.millis_since(now).max(0) / 1000;
+        Some(remaining as u32)
+    }
+
+    /// 取锁——给调度线程与命令层用的访问入口。
+    ///
+    /// 参数是 `&Mutex<Self>`，但调用方手上往往是
+    /// `tauri::State<'_, Arc<Mutex<AppState>>>`。`State` 与 `Arc` 都能
+    /// `Deref` 到 `Mutex`，所以 `AppState::lock(&state)` 能自动解引用 ——
+    /// 这是 Rust 的 deref coercion 在这里帮了个忙。
+    pub fn lock(state: &Mutex<Self>) -> MutexGuard<'_, Self> {
+        match state.lock() {
+            Ok(guard) => guard,
+            // 锁中毒时继续用：某个线程在处理状态时崩了，我们宁可继续服务，
+            // 也不要让整个应用变成哑巴（那会让所有记录静默丢失）。
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+/// 从 Intent 里取出 id（用于事件载荷）。
+fn id_intent(intent: &tacet_core::model::Intent) -> i64 {
+    intent.id.unwrap_or(0)
+}
+
+/// 读取本机时区偏移。
+///
+/// ## 为什么用系统命令而不是纯 Rust 方案
+///
+/// 核心层刻意不引入日期库（见 `tacet-core::time` 的说明），所以「本机
+/// 相对 UTC 差多少」这件事只能从系统问。macOS 上最可靠的做法是读
+/// `/etc/localtime` 链接指向的时区文件，但那需要解析二进制格式。
+///
+/// `date +%z` 是最直接的答案，代价是起一个子进程 —— 而这件事
+/// 只在启动时做一两次（[`AppState::new`] 一次、日志初始化一次），
+/// 成本完全可以接受。
+///
+/// 拿不到时退回 UTC：统计的「今天」会与用户预期差几小时，
+/// 但不会崩，也不会丢数据。
+///
+/// ## 调用方注意
+///
+/// **每次调用都会真的起一个子进程。** 不要在循环里或者每个 tick 里调它 ——
+/// 那会变成一个隐蔽的性能问题（每 10 秒 fork 一次进程）。
+/// 需要反复使用时，调用一次把结果存起来。
+pub fn local_offset() -> LocalOffset {
+    let output = std::process::Command::new("date").arg("+%z").output();
+
+    let Ok(output) = output else {
+        return LocalOffset::utc();
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_offset(&text).unwrap_or_else(LocalOffset::utc)
+}
+
+/// 解析 `+0800` / `-0500` 形式的时区偏移。
+fn parse_offset(text: &str) -> Option<LocalOffset> {
+    let text = text.trim();
+    if text.len() < 5 {
+        return None;
+    }
+
+    let sign = match text.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+
+    let hours: i32 = text.get(1..3)?.parse().ok()?;
+    let minutes: i32 = text.get(3..5)?.parse().ok()?;
+
+    Some(LocalOffset::from_minutes(sign * (hours * 60 + minutes)))
+}
+
+/// 状态层的错误。
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    /// 存储层出错。
+    #[error(transparent)]
+    Storage(#[from] tacet_storage::StorageError),
+
+    /// 核心层出错。
+    #[error(transparent)]
+    Core(#[from] tacet_core::CoreError),
+
+    /// 平台层出错。
+    #[error(transparent)]
+    Platform(#[from] PlatformError),
+}
+
+/// 发一条系统通知（把决策翻译成通知文案）。
+///
+/// 这个函数放在状态层之外，因为它需要窗口身份（通知插件由壳层提供）。
+pub fn notification_text(decision: &InterventionDecision) -> (String, String) {
+    let (title, body) = match decision.kind {
+        NeedKind::Rest => (
+            "建议休息一下".to_string(),
+            decision
+                .reasons
+                .first()
+                .map(Reason::to_text)
+                .unwrap_or_else(|| "该歇一会儿了".to_string()),
+        ),
+        NeedKind::Hydration => (
+            "如果方便，记得喝点水".to_string(),
+            decision
+                .reasons
+                .first()
+                .map(Reason::to_text)
+                .unwrap_or_else(|| "该喝水了".to_string()),
+        ),
+        NeedKind::Movement => (
+            "起来活动一下".to_string(),
+            decision
+                .reasons
+                .first()
+                .map(Reason::to_text)
+                .unwrap_or_else(|| "坐得有点久了".to_string()),
+        ),
+        NeedKind::EyeRest => (
+            "让眼睛歇一会儿".to_string(),
+            decision
+                .reasons
+                .first()
+                .map(Reason::to_text)
+                .unwrap_or_else(|| "看屏幕有点久了".to_string()),
+        ),
+        NeedKind::Fused => (
+            "提醒一下".to_string(),
+            decision
+                .reasons
+                .first()
+                .map(Reason::to_text)
+                .unwrap_or_default(),
+        ),
+    };
+
+    (title, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tacet_platform::MockPlatform;
+
+    fn state() -> AppState {
+        AppState::in_memory(Box::new(MockPlatform::new())).expect("建立状态")
+    }
+
+    #[test]
+    fn 全新状态下不工作() {
+        let state = state();
+        assert_eq!(state.work_state(), WorkState::Idle);
+        assert_eq!(state.continuous_work_minutes(), 0);
+    }
+
+    #[test]
+    fn 观测到活动后进入工作态() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.tick(now).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working);
+    }
+
+    #[test]
+    fn 没有任何历史记录时不会提醒() {
+        // 刚装好应用就弹「你已经 4 小时没喝水了」是最糟的第一印象。
+        let mut state = state();
+        let now = Timestamp::now();
+
+        for _ in 0..10 {
+            let outcome = state.tick(now).expect("tick");
+            assert_eq!(outcome, TickOutcome::Quiet, "没有历史记录时不该提醒");
+        }
+    }
+
+    /// 回归测试：状态变化必须落库。
+    ///
+    /// ## 这个 bug 是怎么被发现的
+    ///
+    /// 早期版本在状态切换时只做了 `bus.emit(...)`，没有写数据库。
+    /// 结果是在单元测试里一切正常（它们只断言「状态机现在处于哪个状态」），
+    /// 但真实跑起来时 `events` 表是**空的** —— 今日统计里的
+    /// 「最长连续工作」永远显示 0。
+    ///
+    /// 这类 bug 的可怕之处在于它**完全静默**：没有报错，没有崩溃，
+    /// 界面正常显示，只是数字永远不对。所以需要一条测试专门盯住
+    /// 「状态变化 → 事件表多了一行」这个因果，而不只是盯住状态机。
+    #[test]
+    fn 工作状态变化会写进事件表() {
+        use std::sync::Arc;
+
+        let platform = MockPlatform::new();
+        let control = Arc::clone(&platform.control);
+        let mut state = AppState::in_memory(Box::new(platform)).expect("建立状态");
+        let now = Timestamp::now();
+
+        assert_eq!(
+            EventRepo::last_occurrence(&state.db, BehaviorKind::WorkStarted).expect("查询"),
+            None,
+            "还没动过，不该有记录"
+        );
+
+        // ① Idle → Working：用户开始干活了
+        state.tick(now).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working);
+        assert_eq!(
+            EventRepo::last_occurrence(&state.db, BehaviorKind::WorkStarted).expect("查询"),
+            Some(now),
+            "开始工作必须落库，否则今日统计永远是 0"
+        );
+
+        // ② Working → Away：人离开了（空闲超过阈值）
+        control.set_idle_seconds(10 * 60);
+        let away = now.saturating_add_millis(11 * MINUTE);
+        state.tick(away).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Away);
+        assert_eq!(
+            EventRepo::last_occurrence(&state.db, BehaviorKind::WorkPaused).expect("查询"),
+            Some(away),
+            "离开也必须落库 —— 最长连续工作是靠 started/paused 配对算出来的"
+        );
+    }
+
+    /// 开始休息要同时留下「暂停工作」和「开始休息」两条记录。
+    ///
+    /// 只有 `break.started` 而没有 `work.paused` 的话，
+    /// `compute_longest_streak` 会把休息之后的整段时间都算进同一段连续工作里，
+    /// 「最长连续工作」就会越滚越大。
+    #[test]
+    fn 开始休息会封住上一段连续工作() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.tick(now).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working);
+
+        let break_at = now.saturating_add_millis(50 * MINUTE);
+        state.start_break(break_at).expect("开始休息");
+
+        assert_eq!(
+            EventRepo::last_occurrence(&state.db, BehaviorKind::WorkPaused).expect("查询"),
+            Some(break_at),
+            "休息的起点就是上一段连续工作的终点"
+        );
+        assert_eq!(
+            EventRepo::last_occurrence(&state.db, BehaviorKind::BreakStarted).expect("查询"),
+            Some(break_at)
+        );
+    }
+
+    /// 回归测试：重复调用 `start_break` 必须是空操作。
+    ///
+    /// ## 这个 bug 是怎么发现的
+    ///
+    /// 界面上「点现在休息」和「提交 Intent」两步都会调用 `startBreak`，
+    /// 而 Rust 侧没有幂等保护。后果是：
+    /// - `break.started` 事件被写两次，今日统计里的休息次数偏多
+    /// - `break_ends_at` 被重置，用户在 Intent 页面停留的时间白送了
+    #[test]
+    fn 重复开始休息不会产生副作用() {
+        use std::sync::Arc;
+
+        let platform = MockPlatform::new();
+        let control = Arc::clone(&platform.control);
+        let mut state = AppState::in_memory(Box::new(platform)).expect("建立状态");
+        let now = Timestamp::now();
+
+        state.tick(now).expect("tick");
+        state.start_break(now).expect("第一次开始休息");
+
+        let count_breaks = |s: &AppState| {
+            tacet_storage::repo::EventRepo::count_in_window(
+                &s.db,
+                BehaviorKind::BreakStarted,
+                &tacet_storage::DateWindow::day_of(now, s.offset),
+            )
+            .expect("统计")
+        };
+
+        assert_eq!(count_breaks(&state), 1);
+
+        // 10 分钟后再次调用（模拟用户提交 Intent）
+        let later = now.saturating_add_millis(10 * MINUTE);
+        control.set_idle_seconds(0);
+        state.start_break(later).expect("第二次开始休息");
+
+        assert_eq!(
+            count_breaks(&state),
+            1,
+            "重复调用不该再记一次 break.started"
+        );
+
+        // 倒计时终点不该被重置 —— 否则用户的实际休息时长会超出设置值
+        let remaining = state.break_remaining_seconds(later);
+        assert!(
+            remaining.is_some_and(|s| s <= 300),
+            "倒计时终点被重置了，剩余时长 {remaining:?} 超过了设置的 5 分钟"
+        );
+    }
+
+    /// 端到端验证：**改提醒间隔 → 提醒频率真的变了**。
+    ///
+    /// ## 这条测试为什么重要
+    ///
+    /// 设置页里改一个数字，用户期待的是「提醒节奏跟着变」。
+    /// 但从界面上的数字到真实的提醒行为，中间要穿过整整一条链路：
+    ///
+    /// ```text
+    ///   设置页 → save_preferences 命令 → settings 表
+    ///        → AppState::preferences() → NeedInputs.settings
+    ///        → NeedCalculator 算需求分数
+    ///        → PolicyEngine 用同一个间隔算冷却时长
+    ///        → 决定这次要不要开口
+    /// ```
+    ///
+    /// 这条链上的任何一环没接上，用户都会觉得「设置根本没用」——
+    /// 而单元测试全绿，因为每一环单独看都是对的。
+    ///
+    /// ## 做法
+    ///
+    /// 走完整的 `tick()` 流程，在同样的时刻检查两次：
+    /// 一次用短间隔（应当提醒），一次用长间隔（应当保持安静）。
+    #[test]
+    fn 把间隔调长之后提醒真的变少了() {
+        use tacet_core::model::SettingsKey;
+        use tacet_storage::repo::SettingsRepo;
+
+        // ## 关于这个时间戳
+        //
+        // 用固定时刻而不是 `Timestamp::now()`，因为**这条业务链路会看时间**：
+        // 深夜（23:00~06:00 UTC）一律不打扰。用 now() 的话，
+        // 测试在白天跑会过、半夜跑会挂 —— 一个只在特定时刻失败的测试
+        // 比没有测试更糟，它会让人开始不信任测试结果。
+        //
+        // 这里选 UTC 14:00（下午时段，允许打扰），并把它当成「现在」。
+        // 取整到当天 14:00：先去掉不足一天的部分，再加上 14 小时。
+        const DAY_MS: i64 = 24 * 60 * MINUTE;
+        let now = Timestamp::from_millis(1_700_000_000_000 / DAY_MS * DAY_MS + 14 * 60 * MINUTE);
+
+        // 先制造一次「很久没喝水」的历史：60 分钟前记过一次喝水
+        let hour_ago = now.saturating_sub_millis(60 * MINUTE);
+
+        /// 造一个「60 分钟没喝水、间隔设为 interval」的干净状态。
+        fn scene(now: Timestamp, hour_ago: Timestamp, interval: u32) -> AppState {
+            let mut state = state();
+
+            // 让工作状态进入 Working —— 否则状态机还没开始计时
+            state.tick(now).expect("tick");
+
+            state
+                .log_behavior(BehaviorKind::WaterLogged, hour_ago)
+                .expect("记录喝水");
+
+            let mut prefs = state.preferences().expect("读偏好");
+            prefs.reminders.hydration.interval_minutes = interval;
+            SettingsRepo::save_preferences(&state.db, &prefs).expect("保存");
+
+            // 再 tick 一次，让状态机与需求都基于新设置稳定下来
+            state.tick(now).expect("tick");
+            state
+        }
+
+        // ── 第一步：间隔 45 分钟 ──
+        // 需求 = 60 / 45 = 1.33 → 分数封顶 1.0，越过 0.75 的触发线。
+        let mut short = scene(now, hour_ago, 45);
+
+        let needs = short.needs(now).expect("算需求");
+        assert!(
+            needs.hydration.get() > 0.75,
+            "60 分钟没喝水、间隔 45 分钟，需求分数应当越过触发线，实际 {}",
+            needs.hydration.get()
+        );
+
+        // 再 tick 一次取「本次是否真的开口」。
+        //
+        // 注意时间要推进到**冷却期之外**：`scene()` 里那次 tick 已经
+        // 发出过提醒（并把 `last_interruption_at` 设成了 now），
+        // 而新逻辑下冷却时长 = 45 × 0.6 = 27 分钟。
+        // 所以推进 30 分钟才是一次干净的「该不该再提醒」的检验。
+        //
+        // 这条断言本身也顺带验证了「短间隔下 30 分钟后可以再提醒」。
+        let after_cooldown = now.saturating_add_millis(30 * MINUTE);
+        let outcome = short.tick(after_cooldown).expect("tick");
+        assert!(
+            matches!(outcome, TickOutcome::Intervene(_)),
+            "间隔 45 分钟时，过了 30 分钟冷却期应当可以再次提醒。\
+             实际决策：{:?}，工作状态：{:?}",
+            short.last_decision,
+            short.work_state()
+        );
+
+        // ── 第二步：把间隔调长到 180 分钟 ──
+        //
+        // 需求变成 60 / 180 = 0.33，远低于触发线。
+        // 这正是用户调大间隔时期待的效果：「别那么频繁地烦我」。
+        let mut long = scene(now, hour_ago, 180);
+
+        let needs = long.needs(now).expect("算需求");
+        assert!(
+            needs.hydration.get() < 0.75,
+            "间隔调成 180 分钟之后需求应当降到触发线以下，实际 {}",
+            needs.hydration.get()
+        );
+
+        assert_eq!(
+            long.tick(after_cooldown).expect("tick"),
+            TickOutcome::Quiet,
+            "间隔调成 180 分钟之后，一小时没喝水不该再触发提醒 —— \
+             否则设置就形同虚设"
+        );
+
+        // 顺带确认这个间隔确实能被读出来（写进去了 ≠ 读得出来）
+        let saved = SettingsRepo::get(&long.db, SettingsKey::ReminderHydrationInterval)
+            .expect("读设置")
+            .expect("应当有值");
+        assert_eq!(saved, serde_json::json!(180));
+    }
+
+    #[test]
+    fn 记录喝水会被写库() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state
+            .log_behavior(BehaviorKind::WaterLogged, now)
+            .expect("记录");
+
+        let last = EventRepo::last_occurrence(&state.db, BehaviorKind::WaterLogged).expect("查询");
+        assert_eq!(last, Some(now));
+    }
+
+    #[test]
+    fn 新增行为会改变需求分数() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        // 先记录一次喝水
+        state
+            .log_behavior(BehaviorKind::WaterLogged, now)
+            .expect("记录");
+
+        // 45 分钟后（默认间隔），喝水需求应当到顶
+        let later = now.saturating_add_millis(45 * MINUTE);
+        let needs = state.needs(later).expect("算需求");
+
+        assert!(
+            needs.hydration.get() > 0.9,
+            "45 分钟没喝水，需求应当接近满值，实际 {}",
+            needs.hydration.get()
+        );
+    }
+
+    #[test]
+    fn 休息流程会记录开始与完成() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.start_break(now).expect("开始休息");
+        assert_eq!(state.work_state(), WorkState::Breaking);
+        assert!(state.break_remaining_seconds(now).is_some());
+
+        state
+            .finish_break(now.saturating_add_millis(5 * MINUTE))
+            .expect("结束休息");
+        assert_eq!(state.work_state(), WorkState::Working, "休息后应当回到工作");
+
+        let completed =
+            EventRepo::last_occurrence(&state.db, BehaviorKind::BreakCompleted).expect("查询");
+        assert!(completed.is_some(), "应当记录了休息完成");
+    }
+
+    /// 回归测试：休息结束后必须落一条 `work.started`。
+    ///
+    /// ## 这个 bug 是怎么被发现的
+    ///
+    /// 查真实数据库时注意到：`break.completed` 之后直接是下一次
+    /// `work.started`，而且 payload 写的是 `{"from":"idle"}` ——
+    /// 说明那条事件来自「空闲后重新观测到活动」，**不是**休息结束本身。
+    ///
+    /// 也就是说：每次休息结束，状态机确实回到了 Working，
+    /// 但**没有任何事件被写下来**。原因是 `finish_break` 里
+    /// `self.clock.handle(...)` 的返回值被丢掉了 —— 而状态变更的回调
+    /// （`on_work_state_changed`，负责写事件 + 广播）正是挂在这个返回值上的。
+    ///
+    /// 后果：`compute_longest_streak` 依赖 `work.started` 来划分工作区间，
+    /// 少一条就等于把「休息前」和「休息后」两段工作糊成了一段，
+    /// 今日统计里的「最长连续工作」会系统性偏大。
+    #[test]
+    fn 休息结束会记录一条工作开始事件() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.start_break(now).expect("开始休息");
+        state
+            .finish_break(now.saturating_add_millis(5 * MINUTE))
+            .expect("结束休息");
+
+        let started = EventRepo::recent_of_kind(&state.db, BehaviorKind::WorkStarted, 5)
+            .expect("查询")
+            .into_iter()
+            .find(|row| row.occurred_at == now.saturating_add_millis(5 * MINUTE));
+
+        let row = started.expect("休息结束应当落一条 work.started，否则统计会少算一段工作");
+        assert!(
+            row.payload.contains("breaking"),
+            "这条 work.started 应当标明来源是 breaking，实际：{}",
+            row.payload
+        );
+    }
+
+    /// 回归测试：已经开始休息后再「跳过」，状态机必须回到工作。
+    ///
+    /// ## 为什么这条重要
+    ///
+    /// `skip_break` 早期只清掉了 `break_ends_at`，**没有动状态机**。
+    /// 如果调用它时状态已经是 Breaking（用户先点了「现在休息」，
+    /// 之后又想跳过），状态就会**永远卡在 Breaking**：
+    ///
+    /// - `WorkClock` 在 Breaking 态不累计工作计时
+    /// - `observe` 里有一条「休息中不因为人离开而改变状态」的保护，
+    ///   所以它会一直卡着，连「人离开」都救不回来
+    /// - 面板会一直显示「休息中」，而休息窗口早就关了
+    ///
+    /// 用户看到的现象是「计时再也不走了」。
+    #[test]
+    fn 休息中跳过会回到工作状态() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.start_break(now).expect("开始休息");
+        assert_eq!(state.work_state(), WorkState::Breaking);
+
+        state
+            .skip_break(now.saturating_add_millis(MINUTE))
+            .expect("跳过");
+
+        assert_eq!(
+            state.work_state(),
+            WorkState::Working,
+            "跳过之后必须回到工作，否则状态机会永远卡在 Breaking"
+        );
+        assert!(
+            state.break_remaining_seconds(now).is_none(),
+            "跳过之后不该还有休息倒计时"
+        );
+    }
+
+    #[test]
+    fn 休息到点会自动结束() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.start_break(now).expect("开始休息");
+
+        // 把时间推过休息时长
+        let after = now.saturating_add_millis(6 * MINUTE);
+        state.tick(after).expect("tick");
+
+        assert_eq!(state.work_state(), WorkState::Working);
+        assert!(state.break_remaining_seconds(after).is_none());
+    }
+
+    /// 回归测试：休息期间被反复 tick 打搅，不能提前结束。
+    ///
+    /// ## 为什么这个测试必须存在
+    ///
+    /// 真实用户报过「显示 5 分钟，过了一会儿就自己结束了」。
+    /// 调度线程每 10 秒 tick 一次，休息期间这一次 tick 会：
+    /// 采样上下文（读前台应用、空闲时长、全屏状态）→ 推进状态机 →
+    /// 读历史 → 算需求 → 判时机。整条链路上任何一个环节误判，
+    /// 都可能把用户从休息里「踢」出来。
+    ///
+    /// 这个测试把那条链路完整走一遍：每 10 秒 tick 一次，连续走满
+    /// 4 分 50 秒（比默认的 5 分钟短 10 秒），期间**每一次**都必须
+    /// 仍是 `Breaking`。只有真正到点后才能结束。
+    ///
+    /// 它保护的不只是「自动结束」那一个分支，而是整个 tick 链路
+    /// 在休息态下的行为 —— 包括空闲观测、状态变更回调、需求计算。
+    #[test]
+    fn 休息期间反复_tick_不会提前结束() {
+        use tacet_core::time::SECOND;
+
+        let mut state = state();
+        let now = Timestamp::now();
+        state.start_break(now).expect("开始休息");
+
+        // 每 10 秒一次，走 29 次 = 290 秒（默认时长 300 秒之内）
+        for i in 1..=29u32 {
+            let at = now.saturating_add_millis(i as i64 * 10 * SECOND);
+            state.tick(at).expect("tick");
+
+            assert_eq!(
+                state.work_state(),
+                WorkState::Breaking,
+                "第 {i} 次 tick（第 {} 秒）时不该结束休息",
+                i * 10
+            );
+            assert!(
+                state.break_remaining_seconds(at).is_some(),
+                "第 {i} 次 tick 后剩余时间不该消失"
+            );
+        }
+
+        // 299 秒时仍在休息（再差 1 秒才到点）
+        let almost = now.saturating_add_millis(299 * SECOND);
+        state.tick(almost).expect("tick");
+        assert_eq!(
+            state.work_state(),
+            WorkState::Breaking,
+            "299 秒时还差 1 秒，不该已经结束"
+        );
+
+        // 301 秒：这次才该结束
+        let past = now.saturating_add_millis(301 * SECOND);
+        state.tick(past).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working, "过了时长就该结束");
+    }
+
+    /// 回归测试：休息期间收到「用户离开」的观测，休息不该被打断。
+    ///
+    /// 去倒水、去窗边远眺本来就会离开电脑 —— 这恰恰是休息该有的样子。
+    /// 如果状态机因为「观测到空闲」而把状态切走，休息就废了。
+    ///
+    /// 注意这里**刻意把 tick 控制在休息时长之内**：超过 300 秒本来
+    /// 就该正常结束，那属于另一条路径（见上一个测试）。这个测试要盯的是
+    /// 「人离开」这个信号本身。
+    #[test]
+    fn 休息期间观测到长时间空闲不会打断休息() {
+        use tacet_core::time::SECOND;
+
+        let platform = MockPlatform::new();
+        let control = std::sync::Arc::clone(&platform.control);
+        let mut state = AppState::in_memory(Box::new(platform)).expect("建立状态");
+
+        let now = Timestamp::now();
+        state.start_break(now).expect("开始休息");
+
+        // 用户起身去倒水：空闲时长一路涨到远超阈值（默认 5 分钟）
+        for i in 1..=8u32 {
+            control.set_idle_seconds(600 + i * 30);
+            let at = now.saturating_add_millis(i as i64 * 30 * SECOND);
+            state.tick(at).expect("tick");
+
+            assert_eq!(
+                state.work_state(),
+                WorkState::Breaking,
+                "第 {i} 次 tick（空闲 {} 秒）时休息被打断了",
+                600 + i * 30
+            );
+        }
+    }
+
+    #[test]
+    fn 记录行为会结算对应的干预() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        // 手工造一条「刚提醒过喝水」的状态
+        let decision = InterventionDecision {
+            kind: NeedKind::Hydration,
+            level: InterventionLevel::Notification,
+            reasons: vec![Reason::SinceLastHydration { minutes: 93 }],
+            actions: vec!["喝几口水".to_string()],
+            fused: Vec::new(),
+        };
+        let id = InterventionRepo::insert(&state.db, &decision.to_intervention(now)).expect("写入");
+        state.last_intervention_id = Some(id);
+        state.last_decision = Some(decision);
+
+        // 用户点了「+1 杯水」
+        state
+            .log_behavior(BehaviorKind::WaterLogged, now)
+            .expect("记录");
+
+        let record = InterventionRepo::find(&state.db, id)
+            .expect("查询")
+            .expect("存在");
+        assert_eq!(
+            record.outcome,
+            Some(InterventionOutcome::Completed),
+            "记录喝水应当把对应的提醒结算为已完成"
+        );
+    }
+
+    #[test]
+    fn 类型不匹配的行为不会结算干预() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        let decision = InterventionDecision {
+            kind: NeedKind::Hydration,
+            level: InterventionLevel::Notification,
+            reasons: Vec::new(),
+            actions: Vec::new(),
+            fused: Vec::new(),
+        };
+        let id = InterventionRepo::insert(&state.db, &decision.to_intervention(now)).expect("写入");
+        state.last_intervention_id = Some(id);
+        state.last_decision = Some(decision);
+
+        // 用户记录的是「活动」，不是「喝水」——不该结算那条喝水提醒
+        state
+            .log_behavior(BehaviorKind::ActivityLogged, now)
+            .expect("记录");
+
+        let record = InterventionRepo::find(&state.db, id)
+            .expect("查询")
+            .expect("存在");
+        assert!(
+            record.outcome.is_none(),
+            "不相关的行为不该结算提醒，否则统计会失真"
+        );
+    }
+
+    #[test]
+    fn 暂停时不做决策() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.set_paused(true, now).expect("暂停");
+        let outcome = state.tick(now).expect("tick");
+
+        assert_eq!(outcome, TickOutcome::Quiet);
+        assert_eq!(state.work_state(), WorkState::Away, "暂停等于离开");
+    }
+
+    #[test]
+    fn 恢复后重新开始计时() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.set_paused(true, now).expect("暂停");
+        state
+            .set_paused(false, now.saturating_add_millis(MINUTE))
+            .expect("恢复");
+
+        assert_eq!(state.work_state(), WorkState::Idle);
+        state
+            .tick(now.saturating_add_millis(2 * MINUTE))
+            .expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working);
+    }
+
+    #[test]
+    fn 系统休眠与唤醒() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.tick(now).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working);
+
+        state.on_sleep(now).expect("休眠");
+        assert_eq!(state.work_state(), WorkState::Away);
+        assert_eq!(state.continuous_work_minutes(), 0, "休眠应清零连续工作");
+
+        state
+            .on_wake(now.saturating_add_millis(8 * 60 * MINUTE))
+            .expect("唤醒");
+        assert_eq!(state.work_state(), WorkState::Idle);
+    }
+
+    #[test]
+    fn 延后会推迟打扰() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.snooze(3, now).expect("延后");
+
+        // 紧接着 tick：应当因为安静期而保持静默
+        let outcome = state.tick(now.saturating_add_millis(30_000)).expect("tick");
+        assert_eq!(outcome, TickOutcome::Quiet);
+    }
+
+    #[test]
+    fn 跳过会记录并结算() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        let decision = InterventionDecision {
+            kind: NeedKind::Rest,
+            level: InterventionLevel::FullScreen,
+            reasons: Vec::new(),
+            actions: Vec::new(),
+            fused: Vec::new(),
+        };
+        let id = InterventionRepo::insert(&state.db, &decision.to_intervention(now)).expect("写入");
+        state.last_intervention_id = Some(id);
+        state.last_decision = Some(decision);
+
+        state.skip_break(now).expect("跳过");
+
+        let record = InterventionRepo::find(&state.db, id)
+            .expect("查询")
+            .expect("存在");
+        assert_eq!(record.outcome, Some(InterventionOutcome::Skipped));
+    }
+
+    #[test]
+    fn 结束休息会取回未恢复的待办() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        // 用户记录了 Intent
+        let intent = tacet_core::model::Intent::new("完成 Auth 模块测试", now).expect("创建");
+        IntentRepo::save(&state.db, &intent).expect("保存");
+
+        state.start_break(now).expect("开始休息");
+        let restored = state
+            .finish_break(now.saturating_add_millis(5 * MINUTE))
+            .expect("结束休息");
+
+        let restored = restored.expect("应当取回一条 Intent");
+        assert_eq!(restored.text, "完成 Auth 模块测试");
+
+        // 第二次结束不该再取回同一条
+        state.start_break(now).expect("开始休息");
+        let again = state
+            .finish_break(now.saturating_add_millis(MINUTE))
+            .expect("结束休息");
+        assert!(again.is_none(), "已恢复过的 Intent 不该重复还给用户");
+    }
+
+    #[test]
+    fn 通知文案符合语气规范() {
+        // PRD §5：像一位懂分寸的同事，不像监工。
+        let decision = InterventionDecision {
+            kind: NeedKind::Hydration,
+            level: InterventionLevel::Notification,
+            reasons: vec![Reason::SinceLastHydration { minutes: 93 }],
+            actions: Vec::new(),
+            fused: Vec::new(),
+        };
+
+        let (title, body) = notification_text(&decision);
+
+        assert_eq!(title, "如果方便，记得喝点水");
+        for forbidden in ["必须", "应该", "又没", "立刻"] {
+            assert!(!title.contains(forbidden), "标题不该含「{forbidden}」");
+            assert!(!body.contains(forbidden), "正文不该含「{forbidden}」");
+        }
+    }
+
+    #[test]
+    fn 休息相关的通知建议的是休息() {
+        let decision = InterventionDecision {
+            kind: NeedKind::Rest,
+            level: InterventionLevel::FullScreen,
+            reasons: vec![Reason::ContinuousWork { minutes: 78 }],
+            actions: Vec::new(),
+            fused: Vec::new(),
+        };
+
+        let (title, body) = notification_text(&decision);
+        assert_eq!(title, "建议休息一下");
+        assert!(body.contains("78"));
+    }
+
+    #[test]
+    fn 时区偏移解析() {
+        assert_eq!(parse_offset("+0800").map(|o| o.minutes()), Some(480));
+        assert_eq!(parse_offset("-0500").map(|o| o.minutes()), Some(-300));
+        assert_eq!(parse_offset("+0530").map(|o| o.minutes()), Some(330));
+        assert_eq!(parse_offset("+0000").map(|o| o.minutes()), Some(0));
+        assert_eq!(parse_offset("").map(|o| o.minutes()), None);
+        assert_eq!(parse_offset("abc").map(|o| o.minutes()), None);
+    }
+
+    #[test]
+    fn 本机时区偏移可读且合理() {
+        let offset = local_offset();
+        // 现实中的时区都在 ±14 小时内
+        assert!(
+            offset.minutes().abs() <= 14 * 60,
+            "读到的时区偏移 {} 分钟不合理",
+            offset.minutes()
+        );
+    }
+
+    #[test]
+    fn 状态锁在中毒后仍可用() {
+        use std::sync::Arc;
+
+        let state = Arc::new(Mutex::new(state()));
+
+        // 制造一次中毒
+        let clone = Arc::clone(&state);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = AppState::lock(&clone);
+            panic!("故意崩掉");
+        }));
+
+        // 之后仍然能取到锁
+        let guard = AppState::lock(&state);
+        assert_eq!(guard.work_state(), WorkState::Idle);
+    }
+}

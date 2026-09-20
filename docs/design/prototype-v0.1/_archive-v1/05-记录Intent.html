@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>05 记录 Intent</title>
+<style>
+
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#F5F6F7;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",Arial,sans-serif;color:#1F2329;-webkit-font-smoothing:antialiased;font-size:14px}
+.page{position:relative;display:flex;flex-direction:column;gap:20px;padding:34px 44px 30px;overflow:hidden}
+.cap{display:flex;align-items:baseline;justify-content:space-between;flex:0 0 auto}
+.cap .t{font-size:14px;font-weight:600;color:#3C444C;letter-spacing:.01em}
+.cap .t em{font-style:normal;color:#A8AEB5;font-weight:600;margin-right:9px;font-variant-numeric:tabular-nums}
+.cap .v{font-size:11.5px;color:#A8AEB5;letter-spacing:.06em}
+.stage{flex:1;display:flex;align-items:center;justify-content:center;gap:26px}
+.stage-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px}
+.stage-bleed{flex:1;display:flex;align-items:center;justify-content:center;margin:-34px -44px -30px;border-radius:0}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+
+/* ---------- 通用细节 ---------- */
+.tile{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.tile svg{width:18px;height:18px}
+.t-teal{background:#E7F5F3;color:#2FA8A0}
+.t-water{background:#E9F2FB;color:#4A9FE0}
+.t-move{background:#FDF1E6;color:#DE8B41}
+.t-eye{background:#F0EDFB;color:#8B7BD8}
+.t-ok{background:#E9F6EF;color:#4CAF7D}
+.t-gray{background:#EFF1F3;color:#7C858E}
+.sub{font-size:12px;color:#98A0A8}
+.ok{color:#4CAF7D}
+
+/* 开关 */
+.sw{width:40px;height:24px;border-radius:12px;background:#D5DADF;position:relative;flex:0 0 auto;transition:.2s}
+.sw i{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.18);transition:.2s}
+.sw.on{background:#2FA8A0}
+.sw.on i{left:18px}
+
+/* 按钮 */
+.btn{border:none;border-radius:10px;font-size:13.5px;font-weight:500;font-family:inherit;cursor:default;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn-primary{background:#2FA8A0;color:#fff;height:38px;padding:0 18px;box-shadow:0 2px 8px rgba(47,168,160,.28)}
+.btn-ghost{background:#fff;color:#3C444C;height:38px;padding:0 16px;border:1px solid #E1E5E9}
+.btn-quiet{background:#F2F4F5;color:#5A636C;height:34px;padding:0 14px}
+.btn-plain{background:transparent;color:#8B939B;font-size:13px;height:30px;padding:0 6px}
+
+/* 窗口 / 面板 */
+.win{background:#fff;border-radius:16px;box-shadow:0 22px 50px rgba(16,24,32,.14),0 2px 8px rgba(16,24,32,.06);border:1px solid rgba(20,28,36,.05);overflow:hidden;position:relative}
+.tl{display:flex;gap:8px;align-items:center}
+.tl i{width:12px;height:12px;border-radius:50%;display:block}
+.tl .r{background:#FF5F57}.tl .y{background:#FEBC2E}.tl .g{background:#28C840}
+
+/* 分组卡片 */
+.group-title{font-size:12.5px;font-weight:600;color:#8B939B;margin:0 0 8px 4px}
+.card{background:#fff;border-radius:12px;border:1px solid #ECEEF0;overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:13px 16px;min-height:56px}
+.row + .row{border-top:1px solid #F0F2F4}
+.row .lab{font-size:13.5px;color:#262C33;flex:1}
+.row .ctl{display:flex;align-items:center;gap:14px}
+.pill{display:flex;align-items:center;gap:4px;background:#F4F6F7;border:1px solid #E7EAED;border-radius:8px;height:30px;padding:0 9px;font-size:13px;color:#3C444C;font-variant-numeric:tabular-nums}
+.pill span{color:#98A0A8;font-size:12px;margin-left:1px}
+
+
+</style>
+</head>
+<body>
+<div class="page" style="width:640px;height:480px">
+
+  <div class="cap">
+    <div class="t"><em>05</em>记录 Intent（休息前）</div>
+    <div class="v">v0.1 Foundation</div>
+  </div>
+  <div class="stage">
+
+    <div class="win" style="width:500px">
+      <div style="padding:15px 18px;border-bottom:1px solid #F0F2F4;display:flex;align-items:center;gap:10px">
+        <div class="tl"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+        <div style="flex:1"></div>
+        <div style="font-size:12.5px;color:#98A0A8">Tacet</div>
+      </div>
+      <div style="padding:26px 26px 22px">
+        <div style="font-size:16.5px;font-weight:600;margin-bottom:6px">休息前，记一下接下来要做什么？</div>
+        <div class="sub" style="margin-bottom:18px">一句话就够，省得回来时想不起来。</div>
+
+        <div style="border:1.5px solid #2FA8A0;border-radius:10px;background:#FBFDFD;padding:12px 13px;display:flex;align-items:center;gap:10px;box-shadow:0 0 0 3px rgba(47,168,160,.08)">
+          <div style="flex:1;font-size:14px;color:#1F2329">完成 Auth 模块测试</div>
+          <div class="num" style="font-size:11.5px;color:#A8AEB5">12/100</div>
+        </div>
+
+        <div class="sub" style="margin-top:12px;font-size:12px">休息结束时会原样还给你</div>
+
+        <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:24px">
+          <button class="btn btn-plain">跳过</button>
+          <button class="btn btn-primary" style="height:38px;padding:0 22px">保存并休息</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,50 @@
+[package]
+name = "tacet-desktop"
+description = "Tacet 桌面应用壳（Tauri 2）：窗口管理、托盘、IPC 与后台调度"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+default-run = "tacet-desktop"
+
+[lib]
+# Tauri 要求有一个 lib 目标才能正确生成移动端入口；
+# 桌面端也用得上 —— 测试可以 import 这里的纯逻辑。
+name = "tacet_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# 核心六件套
+tacet-core.workspace = true
+tacet-context.workspace = true
+tacet-health.workspace = true
+tacet-storage.workspace = true
+tacet-platform.workspace = true
+platform-macos = { path = "../../crates/platform-macos" }
+
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[features]
+# Tauri 官方模板的默认特性组合：custom-protocol 用于生产构建，
+# 开发模式下走 devUrl。
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# 用于「开机自启」（库层只能用 SMAppService，需要 bundle 身份）
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray"] }
+
+[dev-dependencies]
+tempfile = "3"

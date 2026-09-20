@@ -1,0 +1,15 @@
+{
+  "name": "@tacet/desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Tacet 桌面应用（Tauri 壳）",
+  "scripts": {
+    "build": "tauri build --bundles app",
+    "dev": "tauri dev",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.0"
+  }
+}
