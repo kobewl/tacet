@@ -28,12 +28,46 @@ env:
 jobs:
   # ─────────────────────────────────────────────────────────────
   # Rust：格式 + 静态检查 + 测试
+  #
+  # ## 为什么这个 job 也要装 Node 并构建前端
+  #
+  # `apps/desktop/src/main.rs` 里的 `tauri::generate_context!()` 是一个
+  # **编译期**宏：它会读取 `tauri.conf.json` 的 `frontendDist`
+  # （`../../packages/ui/dist`），把前端产物嵌进二进制。那个目录不存在时
+  # 宏直接 panic，编译失败：
+  #
+  #     error: proc macro panicked
+  #     = help: message: The `frontendDist` configuration is set to
+  #       "../../packages/ui/dist" but this path doesn't exist
+  #
+  # 这是个容易漏掉的依赖：本地开发时 `dist/` 早就构建过了，所以本地
+  # 一切正常；只有在干净的 CI 环境里才会暴露。早期版本就是这样 ——
+  # Rust job 一路红着，而报错信息指向的是一个看起来和 Rust 无关的路径。
+  #
+  # 修法不是「造一个空 dist 骗过宏」（那会把「前端没构建」这个真实问题
+  # 藏起来），而是老老实实先把前端建出来 —— 这是真实的构建依赖。
   # ─────────────────────────────────────────────────────────────
   rust:
     name: Rust
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      # 必须在 clippy / test 之前 —— 理由见上面那段长注释。
+      - name: 构建前端产物（Rust 编译期需要）
+        run: pnpm --filter @tacet/ui build
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -134,20 +168,27 @@ jobs:
       # **一条会因为正确代码而失败的检查，最终一定会被绕过**，
       # 所以这里按规范原意收窄到「排除 platform-* 和 storage」。
       #
-      # ## 还要过滤注释行
+      # ## 两个踩过的坑，都写在这里
       #
-      # 第二次误报来自规则自己的文档：`tacet-core/src/lib.rs` 的顶部注释
+      # 坑一：**paths 参数不能放进变量**。写成
+      #     TARGETS="crates/ ':!crates/platform-*'"
+      #     git grep ... -- $TARGETS
+      # 时，变量展开后那对单引号变成了**字面字符**，pathspec 不再被识别为
+      # 排除规则 —— git 会去找一个真的叫 `':!crates/platform-*'` 的路径，
+      # 找不到就忽略。结果是排除悄无声息地失效，CI 报出一堆 platform-macos
+      # 的「违规」。用 bash 数组才能保留每个参数的身份。
+      #
+      # 坑二：**规则会命中它自己的文档**。`tacet-core/src/lib.rs` 顶部注释
       # 里写着「这个 crate 里不允许出现 `#[cfg(target_os = ...)]`」，
-      # 于是 grep 命中了那句**说明规则的话**。
-      #
-      # 所以这里把注释行滤掉，只看真实代码。判据是 `file:line:` 之后
-      # 紧跟 `//`（Rust 的三种注释 `//` / `///` / `//!` 都以它开头）。
+      # 于是 grep 命中了那句**说明规则的话**。所以要把注释行滤掉。
       - name: 红线 1 — 核心 crate 无平台条件编译
         run: |
           set -euo pipefail
-          TARGETS="crates/ ':!crates/platform-*' ':!crates/tacet-storage/'"
 
-          VIOLATIONS=$(git grep -n 'cfg(target_os' -- $TARGETS \
+          # bash 数组：每个元素独立成一个 pathspec（见坑一）
+          PATHS=(crates/ ':!crates/platform-*' ':!crates/tacet-storage/')
+
+          VIOLATIONS=$(git grep -n 'cfg(target_os' -- "${PATHS[@]}" \
             | grep -vE ':[0-9]+:[[:space:]]*//' \
             || true)
 
