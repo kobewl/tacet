@@ -53,9 +53,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 不写 `version`：pnpm 版本由 package.json 的 `packageManager` 决定。
+      # 两边都写会直接报错（ERR_PNPM_BAD_PM_VERSION）——
+      # 而且那本来就违反「版本号单一真值」的原则。
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v4
         with:
@@ -109,9 +110,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 不写 `version`：pnpm 版本由 package.json 的 `packageManager` 决定。
+      # 两边都写会直接报错（ERR_PNPM_BAD_PM_VERSION）——
+      # 而且那本来就违反「版本号单一真值」的原则。
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v4
         with:
@@ -138,12 +140,40 @@ jobs:
   # 这些检查都是 grep 级别的 —— 便宜、确定、假阳性极低。
   # 它们的价值不在于「聪明」，而在于**永远不忘记**：
   # 人会忘记约定，脚本不会。
+  #
+  # ## 为什么这个 job 也需要前端产物
+  #
+  # 红线 6 的第二步会真的跑 `cargo build --workspace`，而
+  # `tauri::generate_context!()` 是编译期宏、需要 `packages/ui/dist`
+  # 存在（详见 rust job 上面那段说明）。少了它就报出
+  # 「摘掉 AI 后构建失败」—— 一个**完全错误**的结论：
+  # 构建失败跟 AI 毫无关系，只是前端没建。
+  #
+  # 这类「假阳性指向错误方向」的检查最危险，因为它会让人去修一个
+  # 不存在的问题。所以这里老老实实把前置条件补齐。
   # ─────────────────────────────────────────────────────────────
   architecture:
     name: 架构红线
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      # 红线 6 会跑 cargo build，而 Tauri 的编译期宏需要这个目录
+      - name: 构建前端产物（红线 6 的构建需要）
+        run: pnpm --filter @tacet/ui build
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
 
       # ── 红线 1：核心 crate 不得出现平台条件编译 ──
       #
@@ -389,9 +419,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 不写 `version`：pnpm 版本由 package.json 的 `packageManager` 决定。
+      # 两边都写会直接报错（ERR_PNPM_BAD_PM_VERSION）——
+      # 而且那本来就违反「版本号单一真值」的原则。
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v4
         with:
