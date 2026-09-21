@@ -168,6 +168,29 @@ export async function getAppVersion(): Promise<string> {
 /** 把主面板窗口调整到内容需要的高度。 */
 export const resizePanel = (height: number) => invoke<void>("resize_panel", { height });
 
+// ============================================================ 开机自启
+
+/**
+ * 读取当前是否已设置为开机自启。
+ *
+ * ## 为什么每次都问后端
+ *
+ * 这个状态存在**系统**里（`~/Library/LaunchAgents` 下的登录项），不在本应用的
+ * 数据库里。用户可以随时在「系统设置 → 通用 → 登录项」里把它改掉 ——
+ * 前端缓存一份就会显示过期状态，那种「我明明关了它怎么还开着」最让人不信任。
+ */
+export const getAutostartEnabled = () => invoke<boolean>("get_autostart_enabled");
+
+/**
+ * 打开或关闭开机自启，**立即生效**。
+ *
+ * 它改的是系统里的登录项，不是本应用的配置 —— 所以没有「保存」这一步。
+ * 失败时调用方应当把开关弹回原值：让控件停在用户点的位置上，
+ * 他会以为已经设好了。
+ */
+export const setAutostartEnabled = (enabled: boolean) =>
+  invoke<void>("set_autostart_enabled", { enabled });
+
 // ============================================================ 应用更新
 
 /**
@@ -212,6 +235,14 @@ export const openReleasePage = (url: string) =>
 // 想确认某个字段前端到底要什么形态，读这里比读 Rust 更快。
 
 const now = Date.now();
+
+/**
+ * 浏览器预览里的开机自启状态。
+ *
+ * 与 `mockSnapshot` 分开：它是**系统状态**，不属于业务快照 ——
+ * 真实实现里它存在系统的登录项里，连数据库都不进。
+ */
+let mockAutostart = false;
 
 // 用 `const` 而非 `let`：我们只改它的**字段**，不重新赋值整个对象。
 // 这样 TypeScript 能确定这个引用的身份永远不变。
@@ -526,6 +557,18 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
 
     case "install_update":
       throw new Error("浏览器预览模式下没有更新器，无法安装更新");
+
+    // ── 开机自启 ──
+    //
+    // 这里**可以**给出有意义的假数据：自启状态是一个偏布尔值，
+    // 在浏览器里点一下开关能看到界面反馈（这就是它存在的意义）。
+    // 真正的写入由 Rust 侧负责，浏览器里只改这份内存状态。
+    case "get_autostart_enabled":
+      return mockAutostart as unknown as T;
+
+    case "set_autostart_enabled":
+      mockAutostart = argBool(args, "enabled");
+      return undefined as unknown as T;
 
     default:
       throw new Error(`未实现的假命令：${command}`);

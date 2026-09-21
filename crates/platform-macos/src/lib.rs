@@ -11,7 +11,7 @@
 //! | [`ScreenManager`] | AppKit `NSScreen` | 无 |
 //! | [`MeetingDetector`] | CoreAudio 设备占用状态（v0.2） | 无 |
 //! | [`NotificationService`] | 由壳层用 Tauri 通知插件实现 | 通知权限 |
-//! | [`StartupService`] | `SMAppService`（macOS 13+） | 无 |
+//! | [`StartupService`] | 由壳层写 LaunchAgent plist 实现（见 `startup.rs`） | 无 |
 //!
 //! ## 权限：一个都不申请
 //!
@@ -137,22 +137,32 @@ impl Platform for MacPlatform {
         // NSScreen 是公开 API。
         report.mark_available(Capability::ScreenEnumeration);
 
-        // SMAppService 在 macOS 13+ 可用，与最低系统版本一致。
-        if startup::sm_app_service_available() {
-            report.mark_available(Capability::StartupLaunch);
-        } else {
-            report.mark_unavailable(
-                Capability::StartupLaunch,
-                "系统版本低于 macOS 13，不支持 SMAppService",
-            );
-        }
-
-        // 下面两项由壳层负责，这里只说明当前状态的「未知」：
-        // 通知权限是一个运行时状态（用户可以随时撤销），只有在真正尝试
-        // 发送时才知道；会议检测属于 v0.2，v0.1 明确不提供。
+        // 下面三项都由壳层负责，这里如实说明「库层不提供」：
+        //
+        // 它们有个共同点 —— 都需要**应用身份**（bundle），而纯库 crate 没有。
+        // 通知要 bundle identifier 才能申请权限；开机自启要 bundle 才能
+        // 在系统里登记登录项；会议检测则单纯是 v0.2 的范围。
+        //
+        // ## 为什么开机自启曾经标错（这里修过一次真实的错误）
+        //
+        // 原先这里把 `StartupLaunch` 标成 available，理由是「SMAppService
+        // 在 macOS 13+ 可用、与最低系统版本一致」。但同一个 crate 里的
+        // `MacStartupService` 对每次调用都返回 `Unsupported` ——
+        // **能力报告与实际能力自相矛盾**。
+        //
+        // 危害不在于显示错了一行字：能力报告的作用是告诉上层「这个能力
+        // 我能不能提供」，好让它决定要不要走降级路径。把一个自己提供不了
+        // 的能力标成可用，等于让上层以为不需要降级。
+        //
+        // 现在改成如实标记：真正提供这项能力的是壳层（`apps/desktop` 里
+        // 用 Tauri 的 autostart 插件），库层不假装能做。
         report.mark_unavailable(
             Capability::Notification,
             "通知能力由应用壳层提供，权限状态在首次发送时确定",
+        );
+        report.mark_unavailable(
+            Capability::StartupLaunch,
+            "开机自启由应用壳层提供，状态存在系统的登录项里",
         );
         report.mark_unavailable(Capability::MeetingDetection, "会议检测属于 v0.2 范围");
 

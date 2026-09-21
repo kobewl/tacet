@@ -22,6 +22,7 @@
 //! 前者要写文件（核心层不该有副作用），后者要碰窗口系统（属于平台细节）。
 //! 它们共同的特点是「只做一件事、没有业务判断」，所以不违反上面那条边界。
 
+pub mod autostart;
 pub mod commands;
 pub mod logging;
 pub mod scheduler;

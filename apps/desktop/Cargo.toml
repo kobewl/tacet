@@ -53,6 +53,13 @@ custom-protocol = ["tauri/custom-protocol"]
 # 用于「开机自启」（库层只能用 SMAppService，需要 bundle 身份）
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray"] }
+# 用于告诉 macOS「登录时不要用恢复窗口的方式再拉起我一遍」——
+# 不关掉这条路径，设置页里的自启开关就是坏的（关掉了也照样自启）。
+# 见 src/autostart.rs 的说明。
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+] }
 
 [dev-dependencies]
 tempfile = "3"

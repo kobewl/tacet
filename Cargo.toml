@@ -38,7 +38,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
-time = { version = "0.3", features = ["formatting", "macros"] }
 
 [profile.release]
 # 健康工具要「存在感低」：体积与峰值内存都往小里压（架构文档 §8 预算）。

@@ -146,20 +146,108 @@ function ReminderRow({ kind, rule, onChange }: ReminderRowProps) {
 }
 
 /**
- * 「检查更新」一行。
+ * 「开机自启」一行。
  *
- * ## 为什么更新是用户主动触发的
+ * ## 三个刻意的设计
  *
- * 一个常驻菜单栏的健康工具在后台偷偷联网，是一件需要向用户解释的事。
- * Tacet 的原则是「不配置任何东西时它也该安静地工作」（原则 7），
- * 所以这里没有自动检查：**点了才查**。
+ * **一、状态来自后端，不来自本地 state。**
+ * 真正的开关是系统里的登录项，用户可以随时在「系统设置 → 通用 → 登录项」
+ * 里改掉。前端缓存一份就会显示过期状态，而「我明明关了它怎么还开着」
+ * 是最容易让人失去信任的一类 bug。
  *
- * ## 状态为什么是一个联合而不是几个 boolean
+ * **二、改完立即生效，不走「保存」。**
+ * 它改的是系统状态，不是本应用的配置 —— 没有草稿这个概念，也就没有
+ * 可保存的东西。如果非要走保存，用户点了保存却发现开关没动，
+ * 反而会怀疑到底生效没有。
  *
- * 「正在查」「已是最新」「有新版本」「检查失败」这四种状态是互斥的，
- * 用 `loading` / `hasUpdate` / `error` 三个独立变量表达，会出现
- * 「既在加载又有错误」这种不可能却表示得出来的组合。
- * 一个字段穷举所有情况，界面就不可能显示出矛盾的状态。
+ * **三、失败时把开关弹回原值。**
+ * 让控件停在用户点的位置上，他会以为已经设好了 —— 那比报错更糟。
+ */
+function AutostartRow() {
+  /** null 表示还没读到（首次加载中）。 */
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // 进来读一次真实状态
+  useEffect(() => {
+    let alive = true;
+    void api
+      .getAutostartEnabled()
+      .then((value) => {
+        if (alive) setEnabled(value);
+      })
+      .catch((err: unknown) => {
+        if (!alive) return;
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const toggle = (next: boolean) => {
+    // 记住原值用于失败回弹 —— 必须在乐观更新**之前**取。
+    const previous = enabled;
+
+    setError(null);
+    setEnabled(next); // 先动一下，点击有即时反馈
+    setSaving(true);
+
+    void (async () => {
+      try {
+        await api.setAutostartEnabled(next);
+      } catch (err) {
+        setEnabled(previous);
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setSaving(false);
+      }
+    })();
+  };
+
+  const loading = enabled === null && !error;
+
+  return (
+    <div className="setting-row">
+      <div className="setting-row-body wide">
+        <div className="setting-row-name">开机时自动启动</div>
+        <div className="sub">
+          {loading
+            ? "正在读取…"
+            : "启动后不弹窗口，安静地待在菜单栏"}
+        </div>
+        {error ? <div className="sub setting-error">{error}</div> : null}
+      </div>
+
+      {/* 开关：与四类提醒用同一个组件样式，保留键盘可操作性与无障碍语义 */}
+      <label className="switch">
+        <input
+          type="checkbox"
+          checked={enabled ?? false}
+          disabled={enabled === null || saving}
+          onChange={(event) => toggle(event.target.checked)}
+          aria-label="开机时自动启动"
+        />
+        <span className="switch-track" aria-hidden>
+          <span className="switch-thumb" />
+        </span>
+      </label>
+    </div>
+  );
+}
+
+/**
+ * 更新流程的状态。
+ *
+ * ## 为什么是一个联合而不是几个 boolean
+ *
+ * 「正在查」「已是最新」「有新版本」「检查失败」「正在安装」这几种状态
+ * 是互斥的。用 `loading` / `hasUpdate` / `error` 三个独立变量表达，
+ * 会出现「既在加载又有错误」这种不可能、却表示得出来的组合 ——
+ * 界面于是可能显示出自己都说不通的样子。
+ *
+ * 一个字段穷举所有情况，就写不出矛盾的状态。
  */
 type UpdateState =
   | { kind: "idle" }
@@ -169,6 +257,15 @@ type UpdateState =
   | { kind: "installing"; percent: number | null }
   | { kind: "error"; message: string };
 
+/**
+ * 「检查更新」一行。
+ *
+ * ## 为什么更新是用户主动触发的
+ *
+ * 一个常驻菜单栏的健康工具在后台偷偷联网，是一件需要向用户解释的事。
+ * Tacet 的原则是「不配置任何东西时它也该安静地工作」（原则 7），
+ * 所以这里没有自动检查：**点了才查**。
+ */
 function UpdateRow() {
   const [state, setState] = useState<UpdateState>({ kind: "idle" });
 
@@ -481,6 +578,18 @@ export function Settings() {
               </select>
             </div>
           </div>
+        </section>
+
+        {/* ---------------------------------------------- 系统 */}
+        <section className="settings-section">
+          <div className="kicker settings-section-title">系统</div>
+          <div className="settings-card">
+            <AutostartRow />
+          </div>
+          <p className="sub settings-note">
+            Tacet 是常驻菜单栏的工具，开机自启后不会弹出窗口 ——
+            它安静地待在菜单栏，到该提醒的时候才出现。
+          </p>
         </section>
 
         {/* ---------------------------------------------- 平台能力 */}

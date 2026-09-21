@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{Manager, RunEvent, WindowEvent};
 
+use tacet_desktop_lib::autostart;
 use tacet_desktop_lib::commands;
 use tacet_desktop_lib::logging;
 use tacet_desktop_lib::scheduler;
@@ -54,6 +55,12 @@ fn main() {
             let _ = windows::toggle_panel(app);
         }))
         .plugin(tauri_plugin_notification::init())
+        // 开机自启。用 LaunchAgent（往 ~/Library/LaunchAgents 写 plist）而不是
+        // SMAppService：后者对**未签名**应用有兼容风险，而 Tacet 没有 Apple 证书。
+        // 取舍与将来如何升级写在 autostart.rs 的模块头部。
+        //
+        // 不传启动参数：Tacet 的所有窗口默认都是 visible: false，
+        // 启动后本来就不显示任何东西，不需要靠参数来「藏窗口」。
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -148,6 +155,9 @@ fn main() {
             update::check_update,
             update::install_update,
             update::open_release_page,
+            // 开机自启（见 autostart 模块：状态存在系统里，不存数据库）
+            autostart::get_autostart_enabled,
+            autostart::set_autostart_enabled,
         ])
         // ------------------------------------------------ 窗口事件
         .on_window_event(|window, event| {
@@ -197,6 +207,16 @@ fn main() {
         RunEvent::Reopen { .. } => {
             // 用户点击 Dock 图标（如果有）：把面板调出来
             let _ = windows::toggle_panel(app_handle);
+        }
+
+        // 主线程就绪 —— 有些 AppKit 调用只能在这里做。
+        //
+        // `disableRelaunchOnLogin` 关掉的是 macOS 的「登录时恢复窗口」，
+        // 那是**第二条自启路径**（与登录项无关）。不关掉它，设置页里的
+        // 「开机自启」开关就是坏的：用户关掉了，下次登录应用照样出现。
+        // 详见 autostart 模块的说明。
+        RunEvent::Ready => {
+            autostart::disable_relaunch_on_login();
         }
 
         _ => {}
