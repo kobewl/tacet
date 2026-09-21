@@ -67,7 +67,8 @@ export function Today() {
 
   return (
     <div className="panel today-shell">
-      <header className="today-header">
+      {/* 同设置页：这一条兼作窗口的拖动把手（Overlay 标题栏把原生那条盖住了）。 */}
+      <header className="today-header" data-tauri-drag-region="deep">
         <div className="kicker">今天</div>
         <h1 className="today-title">
           {state === "breaking"

@@ -145,33 +145,61 @@ pub fn announce_break_shown(app: &AppHandle) {
 /// 实测会跑到另一块显示器上，而用户正在看的是这一块，
 /// 于是「点了设置，屏幕上什么都没出现」。
 fn monitor_under_cursor(app: &AppHandle) -> Option<tauri::Monitor> {
-    // 鼠标位置在物理坐标系里（macOS 的全局坐标），需要反查它在哪块屏上。
-    //
-    // 用 `get_webview_window("break")` 拿光标位置是历史原因：
-    // Tauri 只在窗口上暴露 `cursor_position()`。窗口可能还没建出来，
-    // 那种情况下直接退回主屏。
-    let cursor = app
-        .get_webview_window("break")
-        .and_then(|window| window.cursor_position().ok());
+    monitor_containing(app, cursor_position(app))
+}
 
-    if let Some(cursor) = cursor {
-        let hit = app.available_monitors().ok()?.into_iter().find(|m| {
-            let origin = m.position();
-            let size = m.size();
-            let x = cursor.x as i32;
-            let y = cursor.y as i32;
+/// 鼠标现在在哪（物理像素，左上角原点）。取不到返回 `None`。
+///
+/// 用 `get_webview_window("break")` 拿光标位置是历史原因：Tauri 只在
+/// **窗口**上暴露 `cursor_position()`，没有全局的光标 API。这个窗口在启动时
+/// 就建好了（只是隐藏着），所以正常情况下永远拿得到。
+///
+/// ## 精度：够用，但不精确
+///
+/// `cursor_position()` 内部把全局逻辑坐标一律按**主屏**的缩放比换算成物理
+/// 像素（见 tao 的 `util::cursor_position`）。两块屏缩放比相同的机器上没问题；
+/// 一旦不同（比如内置 Retina 2x + 一台 1080p 的 1x 外接屏），副屏上的点会算偏。
+/// 所以它只适合回答「大致在哪块屏」，不适合拿来算窗口的精确落点 ——
+/// 后者一律用托盘图标自己的位置（见 [`TrayAnchor`]）。
+fn cursor_position(app: &AppHandle) -> Option<(i32, i32)> {
+    let cursor = app.get_webview_window("break")?.cursor_position().ok()?;
+    Some((cursor.x as i32, cursor.y as i32))
+}
 
-            x >= origin.x
-                && x < origin.x + size.width as i32
-                && y >= origin.y
-                && y < origin.y + size.height as i32
-        });
-        if hit.is_some() {
-            return hit;
+/// 点 (x, y) 落在哪块屏上？返回它在 `screens` 里的下标。
+///
+/// 矩形按**左闭右开**处理：右边界和下边界上的点归相邻那块屏。这样两块屏
+/// 紧挨着摆时既不会留缝，也不会有一行像素同时命中两块屏。
+fn screen_index_at(screens: &[ScreenBox], x: i32, y: i32) -> Option<usize> {
+    screens
+        .iter()
+        .position(|s| x >= s.x && x < s.x + s.width as i32 && y >= s.y && y < s.y + s.height as i32)
+}
+
+/// 这个点在哪块屏上？点命中不了任何屏（或压根没给点）时退回主屏。
+fn monitor_containing(app: &AppHandle, point: Option<(i32, i32)>) -> Option<tauri::Monitor> {
+    let monitors = app.available_monitors().ok()?;
+
+    if let Some((x, y)) = point {
+        let screens: Vec<ScreenBox> = monitors.iter().map(ScreenBox::from).collect();
+        if let Some(index) = screen_index_at(&screens, x, y) {
+            return monitors.into_iter().nth(index);
         }
     }
 
     app.primary_monitor().ok().flatten()
+}
+
+/// 主屏在 `screens` 里的下标。认不出主屏时退回 0。
+///
+/// 比较「位置 + 尺寸」而不是名字：外接屏的名字可能是空串，同型号的两块屏
+/// 名字还完全一样（和 [`veil_targets`] 那条注释是同一个理由）。
+fn primary_index(app: &AppHandle, screens: &[ScreenBox]) -> usize {
+    let Some(primary) = app.primary_monitor().ok().flatten() else {
+        return 0;
+    };
+    let wanted = ScreenBox::from(&primary);
+    screens.iter().position(|s| *s == wanted).unwrap_or(0)
 }
 
 /// 把窗口撑满指定的那块屏幕。
@@ -421,13 +449,130 @@ pub fn hide_break_window(app: &AppHandle) {
     hide_break_veils(app);
 }
 
+/// 面板与托盘图标之间留的空隙（逻辑像素）。
+///
+/// 不贴死是因为面板自带 20pt 圆角与阴影 —— 贴死会让阴影糊在菜单栏上。
+const PANEL_GAP: f64 = 6.0;
+
+/// 面板与屏幕左右边缘的最小距离（逻辑像素）。
+const PANEL_MARGIN: f64 = 16.0;
+
+/// 拿不到图标位置时，面板顶边距屏幕顶边的距离（逻辑像素）。
+///
+/// 这是**估计值**不是测量值：菜单栏高度因屏而异（本机实测内置屏 33pt、
+/// 外接屏 30pt），而 Tauri 的 `Monitor` 不暴露「可见区域」，问不到真值。
+/// 只有单实例唤醒、Dock 点击这两条拿不到图标矩形的路径用得到它。
+const PANEL_TOP_FALLBACK: f64 = 33.0;
+
+/// 布局所需的几处间距（物理像素，调用方已按屏幕缩放比换算过）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Insets {
+    /// 面板顶边与托盘图标下沿之间的空隙。
+    gap: i32,
+    /// 面板与屏幕左右边缘的最小距离。
+    margin: i32,
+    /// 拿不到图标时，面板顶边距屏幕顶边的距离。
+    fallback_top: i32,
+}
+
+/// 托盘图标在屏幕上的矩形（物理像素，左上角原点）。
+///
+/// ## 为什么不直接用 `tauri::Rect`
+///
+/// 那个类型的坐标可能是物理的也可能是逻辑的（看平台实现），两个变体要分别
+/// 处理；而且它没法在单测里构造。在入口处一次性换算成物理像素，后面就只剩
+/// 纯算术 —— 也就都能测。
+///
+/// ## 坐标系是通用的
+///
+/// 它和 `Monitor::position()` / `size()` 在同一个坐标系里：全局物理像素、
+/// 左上角原点，副屏的原点可能是负数（本机外接屏的 y 是 -370）。所以
+/// 「这枚图标在哪块屏上」可以直接拿图标中心去和屏幕矩形做命中判断，
+/// 中间不需要任何换算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrayAnchor {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl TrayAnchor {
+    /// 图标中心的横坐标 —— 面板要跟它水平对齐。
+    fn center_x(&self) -> i32 {
+        self.x + self.width / 2
+    }
+
+    /// 图标中心的纵坐标 —— 用来判断它在哪块屏上。
+    fn center_y(&self) -> i32 {
+        self.y + self.height / 2
+    }
+
+    /// 图标下沿 —— 面板的顶边从这里往下让开一点。
+    fn bottom(&self) -> i32 {
+        self.y + self.height
+    }
+}
+
+impl From<&tauri::Rect> for TrayAnchor {
+    fn from(rect: &tauri::Rect) -> Self {
+        // macOS 给的是物理像素（tray-icon 内部已经 `to_physical` 过）。
+        // 逻辑坐标那个分支是给别的平台兜底的，四舍五入即可 ——
+        // 差半个像素在这个用途上看不出来。
+        let (x, y) = match rect.position {
+            tauri::Position::Physical(p) => (p.x, p.y),
+            tauri::Position::Logical(p) => (p.x.round() as i32, p.y.round() as i32),
+        };
+        let (width, height) = match rect.size {
+            tauri::Size::Physical(s) => (s.width as i32, s.height as i32),
+            tauri::Size::Logical(s) => (s.width.round() as i32, s.height.round() as i32),
+        };
+
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
 /// 显示（或聚焦）菜单栏主面板。
 ///
-/// 面板的位置：贴着菜单栏图标的下方。macOS 上通过托盘的事件里
-/// 能拿到图标的位置，但 Tauri 的跨平台 API 没有暴露它。
-/// v0.1 的做法是显示在屏幕右上角 —— 与菜单栏图标的水平位置一致，
-/// 这符合用户的预期（菜单栏应用的下拉面板总在图标下方）。
+/// 这条路径拿不到托盘图标的矩形（单实例唤醒、Dock 点击、托盘菜单里的
+/// 「打开面板」），于是按「鼠标在哪块屏」选屏，面板落在**那块屏**的右上角。
+///
+/// 从左键点击托盘图标进来的路径请用 [`toggle_panel_under_icon`] ——
+/// 只有它能精确贴到**用户点的那一枚**图标下面。
 pub fn toggle_panel(app: &AppHandle) -> tauri::Result<()> {
+    toggle_panel_at(app, None)
+}
+
+/// 显示（或聚焦）菜单栏主面板，并把它贴到**刚被点的那枚托盘图标**下面。
+///
+/// `icon` 来自 `TrayIconEvent::Click` 的 `rect`。这件事必须由事件带进来，
+/// 应用自己猜不出来：只要系统开着「显示器各自有独立的桌面」（默认开启），
+/// **每块屏的菜单栏上都会有一枚 Tacet 图标**（本机实测：内置屏一枚、
+/// 外接屏一枚），点哪一枚就该在哪一块屏上弹面板。
+///
+/// ## 为什么不用 `TrayIcon::rect()` 现问一次
+///
+/// 因为点击事件里的 `rect` 比它更准，理由在两边各自的实现里：
+///
+/// - 事件里的 `rect` 由 tray-icon 的 `send_mouse_event` 算出，读的是
+///   **事件真正发生的那扇窗口**（`NSEvent.window`）—— 用户点的是哪一枚，
+///   它就是哪一枚。
+/// - `TrayIcon::rect()` 读的是 `NSStatusItem.button().window`，也就是
+///   **按钮所属的那一个窗口**。多显示器下它只有单一来源，代表不了
+///   「用户刚点的那一枚」。
+///
+/// 既然点击发生时事件已经把准确答案递到手上，就没有理由再去问一次
+/// 那个语义更弱的接口。
+pub fn toggle_panel_under_icon(app: &AppHandle, icon: &tauri::Rect) -> tauri::Result<()> {
+    toggle_panel_at(app, Some(TrayAnchor::from(icon)))
+}
+
+fn toggle_panel_at(app: &AppHandle, anchor: Option<TrayAnchor>) -> tauri::Result<()> {
     let Some(window) = app.get_webview_window("panel") else {
         return Ok(());
     };
@@ -437,32 +582,97 @@ pub fn toggle_panel(app: &AppHandle) -> tauri::Result<()> {
         return Ok(());
     }
 
-    position_panel(app, &window);
+    position_panel(app, &window, anchor);
     window.show()?;
     window.set_focus()?;
     Ok(())
 }
 
-/// 把面板窗口放到右上角（菜单栏下方）。
-fn position_panel(app: &AppHandle, window: &tauri::WebviewWindow) {
-    let Ok(Some(monitor)) = app.primary_monitor() else {
+/// 把面板窗口摆到该去的地方。
+fn position_panel(app: &AppHandle, window: &tauri::WebviewWindow, anchor: Option<TrayAnchor>) {
+    let Ok(monitors) = app.available_monitors() else {
+        return;
+    };
+    let Ok(window_size) = window.outer_size() else {
         return;
     };
 
-    let scale = monitor.scale_factor();
-    let size = monitor.size();
-    let window_size = window
-        .outer_size()
-        .unwrap_or(tauri::PhysicalSize::new(376, 520));
+    let screens: Vec<ScreenBox> = monitors.iter().map(ScreenBox::from).collect();
 
-    // 逻辑坐标：右上角留 16px 边距，顶部留出菜单栏高度（约 28 逻辑像素）
-    let margin = (16.0 * scale) as i32;
-    let menubar = (28.0 * scale) as i32;
+    // 选屏的优先级：用户刚点的托盘图标 > 鼠标 > 主屏。
+    //
+    // 图标排第一是关键：鼠标可能已经移开了（点完菜单栏图标顺手把手挪回主屏是
+    // 常事），而「刚才点的是哪一枚图标」是个明确的事实，不会骗人。
+    let index = anchor
+        .map(|icon| (icon.center_x(), icon.center_y()))
+        .or_else(|| cursor_position(app))
+        .and_then(|(x, y)| screen_index_at(&screens, x, y))
+        .unwrap_or_else(|| primary_index(app, &screens));
 
-    let x = size.width as i32 - window_size.width as i32 - margin;
-    let y = monitor.position().y + menubar;
+    let Some(screen) = screens.get(index) else {
+        return;
+    };
 
+    let scale = monitors[index].scale_factor();
+    let insets = Insets {
+        gap: (PANEL_GAP * scale).round() as i32,
+        margin: (PANEL_MARGIN * scale).round() as i32,
+        fallback_top: (PANEL_TOP_FALLBACK * scale).round() as i32,
+    };
+
+    let (x, y) = panel_origin(screen, window_size.width as i32, anchor, insets);
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+/// 面板左上角该放哪（物理像素）？纯函数，便于测试。
+///
+/// ## 有图标位置：贴着图标，像原生菜单那样
+///
+/// 水平方向与图标中心对齐，竖直方向从图标下沿再往下让开 `gap`。
+/// 这是 macOS 菜单栏下拉面板的既定行为，用户不需要学。
+///
+/// 竖直方向**不要**去减「菜单栏高度」：菜单栏高度因屏而异（本机实测内置屏
+/// 33pt、外接屏 30pt），写死任何一个值都会在另一块屏上差几个像素。
+/// 图标的矩形本身已经包含了这个高度 —— 它的下沿就是菜单栏的下沿。
+///
+/// ## 没有图标位置：屏幕右上角
+///
+/// 退化成贴着这块屏的右上角。水平位置可能与真正的图标不一致，
+/// 但至少出现在**用户正在看的那块屏**上 —— 这已经比「永远弹在主屏」好得多。
+///
+/// ## 为什么要夹紧
+///
+/// 图标常常就贴在屏幕最右边，此时「与图标居中对齐」算出来的面板会伸到屏幕外
+/// （本机实测：内置屏的菜单栏图标中心在 1059pt，而屏宽 1728pt，算出来正好
+/// 越界）。所以最后要把 x 夹回屏幕内。
+///
+/// 竖直方向不夹：面板高度固定 520pt，比任何一块现代屏幕都矮，
+/// 强行夹反而会在极端情况下把它挪到奇怪的地方。
+fn panel_origin(
+    screen: &ScreenBox,
+    window_width: i32,
+    icon: Option<TrayAnchor>,
+    insets: Insets,
+) -> (i32, i32) {
+    let right = screen.x as i64 + screen.width as i64;
+
+    let y = match icon {
+        Some(icon) => icon.bottom() as i64 + insets.gap as i64,
+        None => screen.y as i64 + insets.fallback_top as i64,
+    };
+
+    let wanted = match icon {
+        Some(icon) => icon.center_x() as i64 - window_width as i64 / 2,
+        None => right - window_width as i64 - insets.margin as i64,
+    };
+
+    // 屏幕比窗口还窄时 max 会小于 min，而 `clamp` 在那种情况下会 panic ——
+    // 先兜住：让窗口左边缘贴齐屏幕左边缘，右半边露在屏幕外，
+    // 但至少左边是看得见的（比整个窗口消失强）。
+    let min_x = screen.x as i64 + insets.margin as i64;
+    let max_x = (right - window_width as i64 - insets.margin as i64).max(min_x);
+
+    (wanted.clamp(min_x, max_x) as i32, y as i32)
 }
 
 /// 把一扇「常规窗口」呈现到用户面前 —— 设置页、今日记录都走这里。
@@ -765,5 +975,181 @@ mod tests {
         assert_eq!(x, -1440 + (1440 - 520) / 2);
         assert!(x < 0, "负原点的屏上，窗口的 x 也可能是负的");
         assert_eq!(y, (900 - 640) / 2);
+    }
+
+    // ======================================================== 面板定位
+    //
+    // 下面这组用例用的是**本机实测的几何**，不是编出来的数字（见
+    // [[tacet-window-diagnosis]]）。它的价值在于：这台机器恰好就是
+    // 「双屏 + 副屏顶边比主屏高」这种最容易出错的排布。
+
+    /// 本机内置屏（物理像素，2 倍缩放）。
+    fn builtin_px() -> ScreenBox {
+        screen(0, 0, 3456, 2234)
+    }
+
+    /// 本机外接屏 —— 摆在右边，而且**顶边比内置屏高 370 像素**，
+    /// 所以原点的 y 是负数。这是真实值。
+    fn external_px() -> ScreenBox {
+        screen(3456, -370, 3840, 2160)
+    }
+
+    /// 2 倍屏上的那组间距（就是 `position_panel` 算出来的值）。
+    fn insets() -> Insets {
+        Insets {
+            gap: 12,
+            margin: 32,
+            fallback_top: 66,
+        }
+    }
+
+    /// 造一枚托盘图标（物理像素）。
+    fn icon(x: i32, y: i32, width: i32, height: i32) -> TrayAnchor {
+        TrayAnchor {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// 本机内置屏菜单栏上那枚 Tacet 图标（实测 118×66 物理像素）。
+    fn builtin_icon() -> TrayAnchor {
+        icon(2060, 0, 118, 66)
+    }
+
+    #[test]
+    fn 面板贴着图标的下沿并且水平居中对齐() {
+        let icon = builtin_icon();
+        let (x, y) = panel_origin(&builtin_px(), 752, Some(icon), insets());
+
+        assert_eq!(x, icon.center_x() - 752 / 2, "面板要与图标中心对齐");
+        assert_eq!(
+            y,
+            icon.bottom() + 12,
+            "顶边要跟着图标走，而不是靠猜菜单栏多高"
+        );
+    }
+
+    #[test]
+    fn 菜单栏多高不用猜_面板跟着图标走() {
+        // 内置屏的菜单栏是 33 逻辑点（66 物理像素），外接屏是 30 逻辑点
+        // （60 物理像素）—— 两块屏不一样高。写死任何一个值，在另一块屏上
+        // 都会差几个像素。跟着图标下沿走就自动是对的。
+        let builtin = panel_origin(&builtin_px(), 752, Some(builtin_icon()), insets());
+        let external_icon = icon(5896, -370, 118, 60);
+        let external = panel_origin(&external_px(), 752, Some(external_icon), insets());
+
+        assert_eq!(builtin.1, 78, "内置屏：66 + 12");
+        assert_eq!(external.1, -298, "外接屏：-370 + 60 + 12");
+        assert_eq!(
+            external.1 - external_icon.y,
+            72,
+            "顶边到屏幕顶边的距离 = 菜单栏高度 + 空隙，因屏而异"
+        );
+    }
+
+    #[test]
+    fn 图标贴着屏幕右边时面板会被收回屏幕内() {
+        // 托盘图标基本都挤在菜单栏最右侧，而面板比图标宽得多 ——
+        // 「与图标居中对齐」算出来的面板常常有一半在屏幕外。
+        let screen = builtin_px();
+        let icon = icon(screen.width as i32 - 120, 0, 118, 66);
+        let (x, _) = panel_origin(&screen, 752, Some(icon), insets());
+
+        assert!(
+            x + 752 <= screen.width as i32 - 32,
+            "面板右边缘必须留在屏幕内，实际 {}",
+            x + 752
+        );
+        assert_eq!(x, screen.width as i32 - 752 - 32, "应当夹到右边距上");
+    }
+
+    #[test]
+    fn 屏幕比面板还窄时不会把面板推到屏幕左边之外() {
+        // 极端情况：用户把窗口拉得很宽，又接了一块小屏。
+        // `clamp` 在 min > max 时会 panic —— 这个用例保证那条路不会崩，
+        // 而且退化的方向是「左边对齐」（看得见）而不是「整个飞出去」。
+        let tiny = screen(0, 0, 400, 300);
+        let (x, y) = panel_origin(&tiny, 752, Some(icon(100, 0, 40, 24)), insets());
+
+        assert_eq!(x, 32, "夹紧后应当贴齐左边缘");
+        assert_eq!(y, 36, "24 + 12");
+    }
+
+    #[test]
+    fn 没有图标位置时面板落在屏幕右上角() {
+        // 单实例唤醒、Dock 点击这两条路径拿不到图标矩形。
+        let (x, y) = panel_origin(&builtin_px(), 752, None, insets());
+
+        assert_eq!(x, 3456 - 752 - 32, "退化成贴着这块屏的右上角");
+        assert_eq!(y, 66, "按估计的菜单栏高度往下让开");
+    }
+
+    #[test]
+    fn 点落在哪块屏上按左闭右开判定() {
+        let screens = [screen(0, 0, 100, 100), screen(100, 0, 100, 100)];
+
+        assert_eq!(
+            screen_index_at(&screens, 0, 0),
+            Some(0),
+            "左上角属于第一块屏"
+        );
+        assert_eq!(screen_index_at(&screens, 99, 99), Some(0));
+        assert_eq!(
+            screen_index_at(&screens, 100, 50),
+            Some(1),
+            "边界上的点归右边那块屏 —— 两块屏紧挨着时既不留缝也不重叠"
+        );
+        assert_eq!(screen_index_at(&screens, 199, 50), Some(1));
+        assert_eq!(screen_index_at(&screens, 200, 50), None, "屏幕之外没有屏");
+        assert_eq!(screen_index_at(&screens, 50, -1), None, "屏幕上方也没有");
+    }
+
+    #[test]
+    fn 副屏菜单栏上的图标会把面板引到副屏() {
+        // 这条是 bug 的回归测试。修之前 `position_panel` 写死了主屏：
+        // 用户在副屏的菜单栏点图标，面板却出现在笔记本屏幕上
+        //（面板写死 1336,33 = 内置屏右上角）。
+        let screens = [builtin_px(), external_px()];
+        let icon = icon(5896, -370, 118, 60);
+
+        assert_eq!(
+            screen_index_at(&screens, icon.center_x(), icon.center_y()),
+            Some(1),
+            "副屏上的图标必须命中副屏"
+        );
+
+        let (x, y) = panel_origin(&screens[1], 752, Some(icon), insets());
+        assert!(x >= 3456, "面板必须落在外接屏的横向范围内，实际 x={x}");
+        assert!(
+            (-370..1790).contains(&y),
+            "面板必须落在外接屏的竖向范围内，实际 y={y}"
+        );
+    }
+
+    #[test]
+    fn 托盘矩形能转成物理像素() {
+        // macOS 给的是物理像素（tray-icon 内部已经 to_physical 过）。
+        let physical = tauri::Rect {
+            position: tauri::Position::Physical(tauri::PhysicalPosition::new(5896, -370)),
+            size: tauri::Size::Physical(tauri::PhysicalSize::new(118, 60)),
+        };
+        let anchor = TrayAnchor::from(&physical);
+
+        assert_eq!((anchor.x, anchor.y), (5896, -370));
+        assert_eq!((anchor.width, anchor.height), (118, 60));
+        assert_eq!(anchor.center_x(), 5955);
+        assert_eq!(anchor.bottom(), -310);
+
+        // 逻辑坐标那个分支也要兜住（别的平台可能给逻辑值）。
+        let logical = tauri::Rect {
+            position: tauri::Position::Logical(tauri::LogicalPosition::new(2948.0_f64, -185.0_f64)),
+            size: tauri::Size::Logical(tauri::LogicalSize::new(59.0_f64, 30.0_f64)),
+        };
+        let anchor = TrayAnchor::from(&logical);
+
+        assert_eq!((anchor.x, anchor.y), (2948, -185));
+        assert_eq!((anchor.width, anchor.height), (59, 30));
     }
 }

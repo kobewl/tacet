@@ -291,14 +291,20 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            // 左键点击 -> 切换面板显隐
+            // 左键点击 -> 切换面板显隐。
+            //
+            // `rect` 是**被点的那枚图标**的屏幕矩形，必须一路传下去：
+            // 多显示器时每块屏的菜单栏上都有一枚 Tacet 图标，不传的话面板
+            // 永远弹在主屏上 —— 用户点副屏的图标、面板却出现在笔记本屏幕上，
+            // 这就是引入这个参数的原因。
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
+                rect,
                 ..
             } = event
             {
-                let _ = windows::toggle_panel(tray.app_handle());
+                let _ = windows::toggle_panel_under_icon(tray.app_handle(), &rect);
             }
         })
         .build(app)?;

@@ -500,7 +500,14 @@ export function Settings() {
 
   return (
     <div className="panel settings-shell">
-      <header className="settings-header">
+      {/* 这一条同时是窗口的**拖动把手**。
+          设置窗口用的是「内容盖住标题栏」的样式（titleBarStyle: Overlay），
+          网页内容把原生标题栏遮住了，整扇窗口就没有任何地方能拖。
+          data-tauri-drag-region="deep" 让这一片区域都能拖着走 ——
+          deep 是必须的：只写裸属性的话，只有点在 header 自己身上才算数，
+          点在「设置」两个字上就没反应（Tauri 的 drag.js 在裸属性下要求
+          命中目标恰好是那个元素本身）。 */}
+      <header className="settings-header" data-tauri-drag-region="deep">
         <div>
           <div className="kicker">设置</div>
           <h1 className="settings-title">提醒节奏</h1>
