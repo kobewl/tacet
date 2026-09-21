@@ -180,6 +180,28 @@ pnpm --filter @tacet/ui dev
 cd apps/desktop && pnpm exec tauri build --bundles app
 ```
 
+#### 怎么正确地打开应用（这一条很容易踩坑）
+
+构建产物在 `target/release/bundle/macos/Tacet.app`。**请双击这个 `.app` 打开**，
+不要直接运行 `target/debug/tacet-desktop`（或 `target/release/tacet-desktop`）。
+
+区别在于 `.app` 是一个「应用包」——它带着 `Info.plist`，系统才由此知道
+这个程序叫 **Tacet**、图标长什么样、属于哪一类应用。而那个裸的可执行文件
+没有这些信息，macOS 会把它当成一个陌生的命令行程序：
+
+| 打开方式 | Dock 里显示 | 图标 | 菜单栏图标 |
+| --- | --- | --- | --- |
+| `Tacet.app` ✅ | Tacet | 产品图标 | 正常 |
+| 直接跑二进制 ❌ | `tacet-desktop` / `exec` | 空白 | 时有时无 |
+
+调试时用 `cargo run` 或直接跑二进制是方便的（能立刻看到日志），
+但**日常使用时一定要开 `.app`**。
+
+```bash
+# 打开构建好的应用
+open target/release/bundle/macos/Tacet.app
+```
+
 ### 数据与隐私
 
 数据库位于 `~/Library/Application Support/Tacet/tacet.db`。
