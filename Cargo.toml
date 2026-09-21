@@ -18,7 +18,7 @@ default-members = ["apps/desktop"]
 # 将来 apps/desktop 的 tauri.conf.json 与 packages/ui/package.json 也从这里取，
 # 由 CI 脚本校验四处一致（研发规范 §3.3 红线 3）。
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"

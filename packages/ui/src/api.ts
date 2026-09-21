@@ -30,6 +30,43 @@ import type {
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/**
+ * 把 IPC 抛出的错误变成一句能给用户看的话。
+ *
+ * ## 为什么不能只判断 `instanceof Error`
+ *
+ * Rust 命令返回 `Err(...)` 时，Tauri **不会**构造一个 JS 的 `Error` ——
+ * 它把错误对象**序列化成普通对象**再 reject（形状是 `{ message: "..." }`，
+ * 对应 Rust 侧的 `CommandError`）。
+ *
+ * 于是 `err instanceof Error` 是 false，`String(err)` 得到 `"[object Object]"`。
+ * 这不是假设：设置页的「检查更新」真实显示过这七个字，而**真正的原因
+ * （仓库还没发过版本）被它盖住了** —— 报错信息把一个本来可解释的状态
+ * 变成了一个谜。
+ *
+ * 所以错误展示统一走这里，不要在组件里自己写 `instanceof` 判断。
+ */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+
+  // Tauri 的 IPC 错误：Rust 侧结构体被序列化后的形状
+  if (typeof err === "object" && err !== null && "message" in err) {
+    // `in` 已经把类型收窄成 `{ message: unknown }`，不需要再断言一次
+    if (typeof err.message === "string") return err.message;
+  }
+
+  // 兜底：至少给出一段可搜索的文本，而不是一句 [object Object]
+  try {
+    const json = JSON.stringify(err);
+    if (json && json !== "{}") return json;
+  } catch {
+    // 循环引用之类序列化失败的情况，落到最后一行
+  }
+
+  return String(err);
+}
+
 /** 动态导入 Tauri API —— 这样在浏览器里也能跑（走假数据）。 */
 async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) {

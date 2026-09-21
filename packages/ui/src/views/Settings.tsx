@@ -179,7 +179,7 @@ function AutostartRow() {
       })
       .catch((err: unknown) => {
         if (!alive) return;
-        setError(err instanceof Error ? err.message : String(err));
+        setError(api.errorMessage(err));
       });
     return () => {
       alive = false;
@@ -199,7 +199,7 @@ function AutostartRow() {
         await api.setAutostartEnabled(next);
       } catch (err) {
         setEnabled(previous);
-        setError(err instanceof Error ? err.message : String(err));
+        setError(api.errorMessage(err));
       } finally {
         setSaving(false);
       }
@@ -310,7 +310,7 @@ function UpdateRow() {
       } catch (err) {
         setState({
           kind: "error",
-          message: err instanceof Error ? err.message : String(err),
+          message: api.errorMessage(err),
         });
       }
     })();
@@ -330,7 +330,7 @@ function UpdateRow() {
       } catch (err) {
         setState({
           kind: "error",
-          message: err instanceof Error ? err.message : String(err),
+          message: api.errorMessage(err),
         });
       }
     })();

@@ -63,7 +63,7 @@ export function useTacet(intervalMs = 60_000): UseTacetResult {
     } catch (err) {
       if (!mounted.current) return;
       setSource("error");
-      setError(err instanceof Error ? err.message : String(err));
+      setError(api.errorMessage(err));
     }
   }, []);
 
@@ -129,7 +129,7 @@ export function useCommand(): {
     try {
       return await action();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(api.errorMessage(err));
       return null;
     } finally {
       setBusy(false);
