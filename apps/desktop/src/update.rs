@@ -196,3 +196,55 @@ pub async fn install_update(app: AppHandle) -> CmdResult<()> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 「还没发过 Release」是最常见的一次性状态，文案要能指导下一步动作。
+    ///
+    /// 这个测试守住的是一件容易被改坏的事：插件原文是一句英文技术话
+    /// （`Could not fetch a valid release JSON from the remote`），
+    /// 用户看不懂。如果将来有人「顺手」删掉这层翻译，这里会红。
+    #[test]
+    fn 发布渠道未就绪时给出可行动的说法() {
+        let raw = "Could not fetch a valid release JSON from the remote";
+        let msg = translate_check_error(raw);
+
+        assert!(
+            msg.contains("还查不到发布信息"),
+            "应当翻译成人话，而不是原样回显；实际是：{msg}"
+        );
+        // 必须指出下一步该干什么 —— 只说「失败了」等于没说
+        assert!(
+            msg.contains("Releases"),
+            "应当指向手动下载的出口；实际是：{msg}"
+        );
+        // 不该把插件原文甩给用户
+        assert!(
+            !msg.contains("Could not fetch"),
+            "不应回显英文原文；实际是：{msg}"
+        );
+    }
+
+    /// 找不到当前平台时，要说清是「这台机器没有对应包」，而不是笼统的网络错误。
+    #[test]
+    fn 缺少对应平台时说清原因() {
+        let msg =
+            translate_check_error("the platform `darwin-aarch64` was not found in the response");
+        assert!(
+            msg.contains("Apple 芯片"),
+            "应指出平台不匹配；实际是：{msg}"
+        );
+    }
+
+    /// 认不出的错误要保留原文 —— 那是排查时唯一的线索，不能吞掉。
+    #[test]
+    fn 未知错误保留原文() {
+        let msg = translate_check_error("some brand new failure");
+        assert!(
+            msg.contains("some brand new failure"),
+            "未知错误不应被吞；实际是：{msg}"
+        );
+    }
+}
