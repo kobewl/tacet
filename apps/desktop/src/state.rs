@@ -91,6 +91,26 @@ pub struct AppState {
     pub snooze_until: Option<Timestamp>,
     /// 用户手动暂停计时（「我离开一会儿」）。
     pub paused: bool,
+    /// 用户最近一次「回到电脑前」的时刻（离开/空闲之后第一次开始工作）。
+    ///
+    /// ## 为什么需要它
+    ///
+    /// 休息与护眼这两类需求的信号之一是「距上次休息过了多久」，
+    /// 而这个数是**按墙上时钟**算的 —— 它不会因为人不在就停下来。
+    /// 于是「晚上 22 点离开、早上 9 点回来」会算出「距上次休息 11 小时」，
+    /// 需求分数直接拉满，用户一坐下就被弹一个全屏「你该休息了」。
+    ///
+    /// 这在语义上就错了：**不在电脑前的那段时间，本身就是最彻底的休息**。
+    /// 所以「回来」这一刻要把这个计时重新起算 —— 用户刚坐下时需求是 0，
+    /// 之后随着他真的工作才慢慢涨上去。
+    ///
+    /// ## 为什么记在内存里而不是落库
+    ///
+    /// 它只影响「此刻该不该提醒」这一个判断，属于运行时状态，
+    /// 不是用户行为的历史事实（历史事实由 `events` 表记录）。
+    /// 应用重启后这个值会丢，但重启后 `continuous_work_minutes` 也是 0
+    /// —— 同样是「从头开始算」，两者一致，不会产生矛盾。
+    pub last_return_at: Option<Timestamp>,
 }
 
 impl AppState {
@@ -119,6 +139,7 @@ impl AppState {
             break_planned_seconds: None,
             snooze_until: None,
             paused: false,
+            last_return_at: None,
         };
 
         state.close_dangling_break(now)?;
@@ -259,6 +280,7 @@ impl AppState {
             break_planned_seconds: None,
             snooze_until: None,
             paused: false,
+            last_return_at: None,
         })
     }
 
@@ -312,25 +334,51 @@ impl AppState {
     }
 
     /// 算一次四类需求。
+    ///
+    /// ## 「距上次休息」的口径：取「上次休息」与「回到电脑前」中较晚的那个
+    ///
+    /// 休息与护眼这两类需求，看的是「距上次满足过了多久」。这个数有两个
+    /// 可能的来源：
+    ///
+    /// - 数据库里那条 `break.completed`（用户真的完成过一次休息）
+    /// - 内存里的 `last_return_at`（用户刚从离开状态回到电脑前）
+    ///
+    /// 取较晚的那个，理由是**离开本身就是休息**：
+    ///
+    /// > 用户晚上 22 点关机走人、早上 9 点回来。库里最后一条
+    /// > `break.completed` 停在 18:40 —— 距现在 14 小时。如果只看它，
+    /// > 用户一坐下，需求分数就是满的，立刻弹「你该休息了」。
+    /// > 但他刚睡了 8 小时，身体比谁都休息得充分。
+    ///
+    /// 取较晚者之后，「回来」那一刻需求归零，之后随着他真的坐下工作
+    /// 才慢慢涨上去 —— 这才是这个数字应该表达的语义。
+    ///
+    /// 注意这**不是**在篡改历史：库里那条 `break.completed` 原样保留，
+    /// 变的只是「此刻该不该提醒」这个判断的输入。
     pub fn needs(&self, now: Timestamp) -> Result<tacet_core::model::HealthNeeds, StateError> {
         let prefs = self.preferences()?;
+
+        // 「最后一次满足了休息需求」的时刻 —— 完成休息、或刚从离开中回来
+        let last_rest_satisfied = most_recent_of(
+            EventRepo::last_occurrence(&self.db, BehaviorKind::BreakCompleted)?,
+            self.last_return_at,
+        );
+        // 护眼同理（用户离开屏幕时，眼睛本身就在休息）
+        let last_eye_rest_satisfied = most_recent_of(
+            EventRepo::last_occurrence(&self.db, BehaviorKind::EyeRestLogged)?,
+            self.last_return_at,
+        );
 
         let inputs = NeedInputs {
             now,
             continuous_work_minutes: self.continuous_work_minutes(),
-            last_break_completed_at: EventRepo::last_occurrence(
-                &self.db,
-                BehaviorKind::BreakCompleted,
-            )?,
+            last_break_completed_at: last_rest_satisfied,
             last_water_logged_at: EventRepo::last_occurrence(&self.db, BehaviorKind::WaterLogged)?,
             last_activity_logged_at: EventRepo::last_occurrence(
                 &self.db,
                 BehaviorKind::ActivityLogged,
             )?,
-            last_eye_rest_logged_at: EventRepo::last_occurrence(
-                &self.db,
-                BehaviorKind::EyeRestLogged,
-            )?,
+            last_eye_rest_logged_at: last_eye_rest_satisfied,
             settings: prefs.reminders,
         };
 
@@ -357,6 +405,25 @@ impl AppState {
         to: WorkState,
         now: Timestamp,
     ) -> Result<(), StateError> {
+        // 「用户回来了」是需求计时的重新起算点。
+        //
+        // 休息与护眼类需求看的是「距上次休息 / 远眺过了多久」，那个数是按
+        // 墙上时钟算的。用户离开 8 小时（睡觉、出门）之后，那个数会累积到
+        // 荒谬的程度，一坐下就被弹「你该休息了」—— 而他的身体刚休息完。
+        // 详见 `last_return_at` 字段的说明。
+        //
+        // 只有从「离开/空闲」回到「工作」才算回来：
+        // Working → Working 是不可能的（`handle` 只在真变化时返回 Some），
+        // 而从 Breaking 结束回到 Working 由 `finish_break` 走，
+        // 那次休息本身就是一次满足，不需要额外重置。
+        if to == WorkState::Working && matches!(from, WorkState::Away | WorkState::Idle) {
+            self.last_return_at = Some(now);
+            crate::logging::info(&format!(
+                "用户回到电脑前（从 {}），休息类需求的计时从此刻重新起算",
+                from.as_str()
+            ));
+        }
+
         // 只有「开始工作」和「停止工作」两件事值得记。
         // Idle -> Working 与 Away -> Working 都算开始工作；
         // Working -> Away 与 Working -> Idle 都算停止。
@@ -481,6 +548,11 @@ impl AppState {
         }
 
         // ⑥ 做决策
+        //
+        // 先把空闲秒数取出来：`context` 接下来会被 move 进 `DecisionInput`，
+        // 而决定之后那条日志还要用它（它是判断「人到底在不在」的关键证据）。
+        let idle_seconds_at_decision = context.idle_seconds;
+
         let decision = self.policy.decide(&DecisionInput {
             now,
             context,
@@ -496,6 +568,29 @@ impl AppState {
         if decision.level == InterventionLevel::Silent {
             return Ok(TickOutcome::Quiet);
         }
+
+        // 真的要打扰用户了 —— 记一笔。
+        //
+        // ## 为什么这条日志必须有
+        //
+        // 用户报过「我一直在息屏，还提醒休息」。查日志时发现**什么都没有**：
+        // 提醒确实发出去了（`interventions` 表里有 10 条记录），但日志里
+        // 一个字都没写，只能靠翻数据库才看出来。没有日志，就只能猜。
+        //
+        // 这条记录要把「当时是什么情况」一起写下来 —— 尤其是空闲秒数，
+        // 它是判断「人到底在不在」的关键证据：
+        //
+        // - 日志里空闲 0 秒 → 用户确实在电脑前，提醒是合理的
+        // - 日志里空闲几千秒 → 人不在却发了提醒，那就是判定逻辑有问题
+        //
+        // 有了这条，同类问题下次一眼就能定位，不用再翻数据库。
+        crate::logging::info(&format!(
+            "发出提醒：{:?} 等级 {:?}（空闲 {} 秒，连续工作 {} 分钟）",
+            decision.kind,
+            decision.level,
+            idle_seconds_at_decision,
+            self.continuous_work_minutes()
+        ));
 
         // ⑦ 记录这次干预（执行由调用方完成）
         let record = decision.to_intervention(now);
@@ -824,6 +919,22 @@ impl AppState {
 /// 从 Intent 里取出 id（用于事件载荷）。
 fn id_intent(intent: &tacet_core::model::Intent) -> i64 {
     intent.id.unwrap_or(0)
+}
+
+/// 两个可选时刻里**较晚**的那个（都缺则为 `None`）。
+///
+/// 用于「最后一次满足了某类需求」这类口径：数据库里有一条历史记录，
+/// 内存里可能还有一个更近的运行时事件，取较晚者才是「最近一次」。
+///
+/// 全是 `None` 时返回 `None` 而不是「现在」—— 「没有依据」和
+/// 「刚刚满足过」是两回事，前者应当让需求保持为 0（见需求引擎里
+/// 「没有任何记录时不报高需求」的说明）。
+fn most_recent_of(a: Option<Timestamp>, b: Option<Timestamp>) -> Option<Timestamp> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    }
 }
 
 /// 读取本机时区偏移。
@@ -1756,6 +1867,131 @@ mod tests {
                 600 + i * 30
             );
         }
+    }
+
+    /// 回归测试：**离开一整天之后回来，不该立刻被弹休息提醒**。
+    ///
+    /// ## 这个 bug 是怎么被发现的
+    ///
+    /// 用户报「我一直在息屏，还提醒休息」。除了窗口策略那条（人不在
+    /// 仍然放行），还有这第二个原因：
+    ///
+    /// 休息需求看的是「距上次满足休息过了多久」，而这个数是按**墙上时钟**
+    /// 算的 —— 人不在，它照样在涨。用户晚上 22 点离开、早上 9 点回来，
+    /// 这个数已经累积了 11 小时，需求分数爆表，一坐下就吃一个全屏提醒。
+    ///
+    /// 但语义上完全说不通：**不在电脑前的那段时间，本身就是最彻底的休息**。
+    /// 他刚睡了 8 小时，是该被提醒「你该休息了」吗？
+    ///
+    /// 这条测试照搬真实数据的时间线。
+    #[test]
+    fn 离开很久之后回来不会被立刻提醒休息() {
+        use tacet_core::time::HOUR;
+
+        let platform = MockPlatform::new();
+        let control = std::sync::Arc::clone(&platform.control);
+        let mut state = AppState::in_memory(Box::new(platform)).expect("建立状态");
+
+        let now = Timestamp::now();
+
+        // 上一次完成休息是 14 小时前（昨天傍晚）
+        let long_ago = now.saturating_sub_millis(14 * HOUR);
+        EventRepo::append(&state.db, BehaviorKind::BreakCompleted, "{}", long_ago).expect("写入");
+
+        // 用户昨晚离开、现在刚回来。先让他进入 Away 状态。
+        control.set_idle_seconds(11 * 3600);
+        state.tick(now).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Away, "应当已判定为离开");
+
+        // 此刻的需求确实是满的 —— 这是事实，不是 bug
+        let while_away = state.needs(now).expect("算需求");
+        assert!(
+            while_away.rest.get() >= 0.99,
+            "离开 14 小时，需求分数本来就该是满的（实际 {}）",
+            while_away.rest.get()
+        );
+
+        // 用户回来了：动了一下鼠标
+        control.set_idle_seconds(0);
+        let back = now.saturating_add_millis(MINUTE);
+        state.tick(back).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working, "应当已回到工作态");
+
+        // 关键：刚回来的这一刻，休息需求必须被清空
+        let just_back = state.needs(back).expect("算需求");
+        assert!(
+            just_back.rest.get() < 0.05,
+            "刚回到电脑前，休息需求应当接近零（实际 {}）—— \
+             离开的 11 小时本身就是休息，不该让用户一坐下就被提醒",
+            just_back.rest.get()
+        );
+    }
+
+    /// 回归测试：回来之后，需求要随着真正的工作重新涨上去。
+    ///
+    /// 上一条测试守的是「回来那一刻归零」。但如果归零之后**永远不涨**，
+    /// 那提醒就彻底失效了 —— 用一个「需求永远为零」的 bug 去修
+    /// 「需求虚高」的 bug，等于把产品功能删掉。
+    ///
+    /// 所以这条测试要走完一个完整的间隔，确认提醒能力还在。
+    ///
+    /// ## 为什么要 tick 很多次，而不是一次跳到一小时之后
+    ///
+    /// `WorkClock` 有一条**大跳步封顶**（`MAX_STEP_MS = 60 秒`）：
+    /// 两次更新之间超过 60 秒的部分不计入工作时长。这是有意为之的保护 ——
+    /// 系统休眠、进程被挂起时，那段时间不该被算成「连续工作」。
+    ///
+    /// 所以「一小时的工作」必须由许多次小步长的 tick 累积出来，
+    /// 就像真实应用那样（调度器每 10 秒 tick 一次）。一次跳一小时
+    /// 只会记下 60 秒 —— 那是在测封顶保护，不是在测需求累积。
+    #[test]
+    fn 回来之后需求会随工作时间重新累积() {
+        use tacet_core::time::{MINUTE, SECOND};
+
+        let platform = MockPlatform::new();
+        let control = std::sync::Arc::clone(&platform.control);
+        let mut state = AppState::in_memory(Box::new(platform)).expect("建立状态");
+
+        let now = Timestamp::now();
+        // 上一次休息是很久以前
+        EventRepo::append(
+            &state.db,
+            BehaviorKind::BreakCompleted,
+            "{}",
+            now.saturating_sub_millis(600 * MINUTE),
+        )
+        .expect("写入");
+
+        // 离开后回来
+        control.set_idle_seconds(3600);
+        state.tick(now).expect("tick");
+        control.set_idle_seconds(0);
+        let back = now.saturating_add_millis(MINUTE);
+        state.tick(back).expect("tick");
+
+        let just_back = state.needs(back).expect("算需求");
+        assert!(
+            just_back.rest.get() < 0.05,
+            "刚回来时应当接近零（实际 {}）",
+            just_back.rest.get()
+        );
+
+        // 用户真的工作了一小时 —— 按真实节奏每 30 秒 tick 一次
+        // （步长必须小于 MAX_STEP_MS，否则会被封顶保护吃掉）
+        let mut at = back;
+        for _ in 0..122 {
+            at = at.saturating_add_millis(30 * SECOND);
+            state.tick(at).expect("tick");
+        }
+
+        let after_work = state.needs(at).expect("算需求");
+        assert!(
+            after_work.rest.get() > 0.9,
+            "工作一小时（{} 分钟）后需求应当重新涨上来（实际 {}）—— \
+             否则提醒就再也不工作了",
+            at.millis_since(back) / MINUTE,
+            after_work.rest.get()
+        );
     }
 
     #[test]
