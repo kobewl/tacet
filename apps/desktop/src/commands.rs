@@ -312,15 +312,13 @@ pub fn start_break(app: AppHandle, state: State<'_, SharedState>) -> CmdResult<s
     // 成败都记一笔。只记失败是不够的：用户报「点了没反应」时，
     // 日志里什么都没有会有两种解释 —— 请求没到后端，或者到了但成功了。
     // 两种情况的排查方向完全不同，所以成功也要留下痕迹。
+    //
+    // 其它屏幕的蒙层由 `show_break_window` 内部一并处理（它知道
+    // 「主界面先显示、蒙层后铺」这个顺序，理由见那里的文档）。
+    // 这里不再单独调用 —— 同一个动作有两个入口，改一处就会漏另一处。
     match windows::show_break_window(&app) {
         Ok(()) => crate::logging::info("用户开始休息，休息界面已打开"),
         Err(err) => crate::logging::error(&format!("打不开休息窗口：{err}")),
-    }
-
-    // 盖住其它屏幕。失败只降级不中断：主屏的休息界面已经在显示，
-    // 核心功能没有丢，不该因为一个附加的遮挡层让整个流程失败。
-    if let Err(err) = windows::show_break_veils(&app) {
-        crate::logging::warn(&format!("幕布窗口没盖起来（休息界面不受影响）：{err}"));
     }
 
     if let Some(snapshot) = snapshot.clone() {
@@ -613,19 +611,93 @@ fn set_paused(
     snapshot.ok_or_else(|| CommandError::from("无法切换计时状态".to_string()))
 }
 
-/// 手动预览一次全屏休息提醒。
+/// 手动预览一次整屏提醒。
 ///
-/// 用于让用户（和演示）看到提醒长什么样，**不写库、不影响统计** ——
-/// 它不该污染「接受率」这类真实数据。
+/// ## 它存在的理由
+///
+/// 「我设了 45 分钟，怎么知道到点会是什么样？」—— 等 45 分钟太久了。
+/// 这个命令让用户（和演示）立刻看到提醒长什么样。
+///
+/// ## 不写库、不影响统计
+///
+/// 它不该污染「接受率」这类真实数据，所以**不落 `interventions` 表**、
+/// 不碰 `last_interruption_at`。只把这一次的决策放进内存里的
+/// `last_decision`，让界面能按它渲染文案。
+///
+/// ## 为什么要能指定需求类型
+///
+/// 四类提醒在这一屏上的文案和主按钮都不同（休息是「现在休息」，
+/// 喝水是「喝了」）。只预览休息的话，另外三类就等于没人验证过 ——
+/// 而这正是之前那个「喝水提醒从来没送达过」能藏这么久的原因之一。
 #[tauri::command]
-pub fn preview_reminder(app: AppHandle) -> CmdResult<serde_json::Value> {
+pub fn preview_reminder(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    kind: Option<String>,
+) -> CmdResult<serde_json::Value> {
+    use tacet_core::model::{InterventionLevel, NeedKind, Reason};
+    use tacet_core::policy::InterventionDecision;
+
+    let need_kind = match kind.as_deref() {
+        Some("hydration") => NeedKind::Hydration,
+        Some("movement") => NeedKind::Movement,
+        Some("eye_rest") => NeedKind::EyeRest,
+        // 默认休息：它是产品的主场景
+        _ => NeedKind::Rest,
+    };
+
+    // 每个需求类型配一句真实会出现的理由文案（照抄 decide() 的产出格式）
+    let reasons = match need_kind {
+        NeedKind::Rest => vec![
+            Reason::ContinuousWork { minutes: 50 },
+            Reason::SinceLastBreak { minutes: 80 },
+        ],
+        NeedKind::Hydration => vec![Reason::SinceLastHydration { minutes: 45 }],
+        NeedKind::Movement => vec![Reason::SinceLastMovement { minutes: 60 }],
+        NeedKind::EyeRest => vec![Reason::ScreenTime { minutes: 45 }],
+        NeedKind::Fused => Vec::new(),
+    };
+
+    let decision = InterventionDecision {
+        kind: need_kind,
+        level: InterventionLevel::FullScreen,
+        reasons,
+        actions: tacet_core::policy::suggested_actions(need_kind),
+        fused: Vec::new(),
+    };
+
+    // 让界面按这次预览的决策渲染文案（内存字段，下一次真实 tick 会覆盖它）
+    {
+        let mut guard = AppState::lock(&state);
+        guard.last_decision = Some(decision.clone());
+    }
+
     windows::show_break_window(&app)?;
 
+    // 广播新快照，让刚打开的窗口立刻拿到这次预览的决策 ——
+    // 否则它会先渲染成上一次的真实决策，然后在下一次 tick 时才跳变。
+    let snapshot = {
+        let guard = AppState::lock(&state);
+        scheduler::build_snapshot(&guard)
+    };
+    if let Some(snapshot) = snapshot {
+        windows::broadcast(
+            &app,
+            serde_json::json!({ "type": "snapshot", "snapshot": snapshot }),
+        );
+    }
+
     Ok(serde_json::json!({
-        "kind": "rest",
+        "kind": match need_kind {
+            NeedKind::Rest => "rest",
+            NeedKind::Hydration => "hydration",
+            NeedKind::Movement => "movement",
+            NeedKind::EyeRest => "eyeRest",
+            NeedKind::Fused => "rest",
+        },
         "level": 4,
-        "reasons": [{ "reason": "continuous_work", "minutes": 50 }],
-        "actions": ["离开屏幕，让眼睛看看远处", "接杯水，顺便活动一下肩颈"],
+        "reasons": decision.reasons,
+        "actions": decision.actions,
     }))
 }
 

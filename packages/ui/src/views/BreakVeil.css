@@ -11,44 +11,76 @@
  * 2. **中心内容更小** —— 主屏才是这次休息的「主场」，副屏是衬托。
  *    两块屏都做得一样满，会让人不知道该看哪个。
  *
- * 关于为什么用自绘渐变而不是 `backdrop-filter`：见 `BreakFlow.css`
- * 开头那段说明 —— 透明窗口上那个属性是假的，这里踩过一次坑。
+ * ## 背景为什么是半透明的
+ *
+ * 模糊来自窗口自己的原生毛玻璃（`windowEffects: ["fullScreenUI"]`，
+ * 见 `windows::blur_effects`），不是这里画出来的。
+ * 这层颜色只是给画面定调，必须留出透明度 —— 写成不透明就会把
+ * 毛玻璃完全盖住，桌面又变回清清楚楚，跟没模糊一样。
+ *
+ * 早期为了「假装毛玻璃」把这里写成不透明，是因为当时没有原生模糊
+ * （`backdrop-filter` 在透明窗口上采样不到桌面）。现在有了之后，
+ * 那套不透明的画法就该让位。
  */
-
 .break-veil {
   width: 100vw;
   height: 100vh;
   position: relative;
   overflow: hidden;
 
-  /* 与主屏同一组光源，色相偏淡一档：副屏是背景音，不该抢主屏 */
+  /* 与主屏同一组光源，色相偏淡一档：副屏是背景音，不该抢主屏。
+     透明度略低于主屏 —— 副屏不是视线焦点，模糊可以更透一点。 */
   background:
     radial-gradient(
       760px 620px at 12% 2%,
-      rgba(216, 233, 240, 0.95) 0%,
+      rgba(216, 233, 240, 0.7) 0%,
       rgba(216, 233, 240, 0) 62%
     ),
     radial-gradient(
       680px 560px at 88% 10%,
-      rgba(245, 233, 222, 0.9) 0%,
+      rgba(245, 233, 222, 0.66) 0%,
       rgba(245, 233, 222, 0) 64%
     ),
     radial-gradient(
       840px 720px at 78% 100%,
-      rgba(213, 231, 237, 0.95) 0%,
+      rgba(213, 231, 237, 0.7) 0%,
       rgba(213, 231, 237, 0) 66%
     ),
-    linear-gradient(158deg, #fcfdfe 0%, #f5f8fa 48%, #fbf9f6 100%);
+    linear-gradient(
+      158deg,
+      rgba(252, 253, 254, 0.82) 0%,
+      rgba(245, 248, 250, 0.8) 48%,
+      rgba(251, 249, 246, 0.82) 100%
+    );
 
   display: flex;
   align-items: center;
   justify-content: center;
+
+  /* 幕布出现得比主界面稍慢一点，让「主屏先亮起、副屏跟上」有个层次。
+     两块屏同时闪一下的观感像显示器故障，错开就好多了。 */
+  animation: veilFadeIn 700ms var(--ease-out) 120ms both;
 
   /* 整块都是可点的出口，所以给出正确的手势反馈 */
   cursor: pointer;
   /* 键盘聚焦时不要默认的蓝色描边 —— 这个界面自己决定怎么表达焦点 */
   outline: none;
   user-select: none;
+}
+
+/**
+ * 幕布的渐入 —— 和主屏的 `veilIn` 是同一个意图，名字必须区分开。
+ *
+ * 两个文件会被打进同一个 CSS，`@keyframes` 的名字也是全局的：
+ * 重名意味着后加载的那个覆盖前一个，两边动画会互相顶掉。
+ */
+@keyframes veilFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .veil-content {
@@ -100,4 +132,12 @@
   color: var(--text-quaternary);
   opacity: 0.55;
   pointer-events: none;
+}
+
+/* ============================================================ 减少动态效果 */
+
+@media (prefers-reduced-motion: reduce) {
+  .break-veil {
+    animation: none;
+  }
 }

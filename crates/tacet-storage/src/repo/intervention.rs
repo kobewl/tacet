@@ -158,13 +158,36 @@ impl InterventionRepo {
     /// 最近一次**真正打扰到用户**的干预。
     ///
     /// 决策引擎用一个类似的摘要来判断「同类提醒是不是刚发过」。
-    /// 只挑打扰等级的记录：不然一次 Level 1 的菜单栏计数会把冷却期也占掉。
+    ///
+    /// ## 为什么只挑打扰等级的记录
+    ///
+    /// 不然一次 Level 1 的菜单栏计数会把冷却期也占掉。
+    ///
+    /// ## 为什么排除掉「已延后」的那条
+    ///
+    /// 这一条修的是一个真实 bug：用户点了「3 分钟后」，**3 分钟后不会再有提醒**。
+    ///
+    /// ```text
+    ///   第 45 分钟  提醒弹出，用户点「3 分钟后」
+    ///               → 这条记录 outcome = snoozed
+    ///               → snooze_until = 第 48 分钟
+    ///   第 48 分钟  延后到点了（snooze_until 过滤器把它放行）
+    ///               → 但冷却期是「上次提醒时刻 + 45 分钟」= 第 90 分钟
+    ///               → 于是又被冷却拦住，用户白等一场
+    /// ```
+    ///
+    /// 根子在于「延后」是一条**重新约定**：用户按下的那一刻，
+    /// 就等于把这次提醒改期到了 3 分钟后。既然后面有 `snooze_until`
+    /// 这道闸门负责「在那之前保持安静」，冷却期就不该再拿原始时刻算一遍 ——
+    /// 两道闸门叠在一起，延后窗口被盖住，承诺就落空了。
+    ///
+    /// 所以：被延后的那条记录，不再参与冷却计算。
     pub fn last_disturbing(db: &Database) -> Result<Option<Intervention>> {
         let conn = db.lock();
         let row = conn
             .query_row(
                 "SELECT id, kind, level, reason, fired_at, resolved_at, outcome, snooze_minutes \
-                 FROM interventions WHERE level >= 2 \
+                 FROM interventions WHERE level >= 2 AND (outcome IS NULL OR outcome != 'snoozed') \
                  ORDER BY fired_at DESC, id DESC LIMIT 1",
                 [],
                 |row| {
@@ -519,6 +542,64 @@ mod tests {
 
         assert_eq!(last.level, InterventionLevel::Notification);
         assert_eq!(last.fired_at, later, "应当取最近的那条打扰记录");
+    }
+
+    /// 回归测试：被用户「延后」的那条提醒，不该再占着冷却期。
+    ///
+    /// ## 这个 bug 长什么样
+    ///
+    /// 用户点了「3 分钟后」，然后 3 分钟后**什么都没发生**。
+    ///
+    /// 原因就是这条查询会把那条 `snoozed` 记录当成「最近一次打扰」返回，
+    /// 而冷却期是从**它的原始时刻**起算的 —— 于是延后窗口（3 分钟）
+    /// 整个落在冷却期（一个完整间隔）里面，延后到点时又被冷却拦下。
+    ///
+    /// 用户看到的是「我按了 3 分钟后，它就再也不理我了」。
+    /// 这条测试钉住的是：延后之后，冷却不该再叠一层。
+    #[test]
+    fn 已延后的提醒不再占用冷却期() {
+        let db = Database::open_in_memory().expect("打开");
+
+        // 第 45 分钟弹出提醒，用户点了「3 分钟后」
+        let fired = t0();
+        let id = InterventionRepo::insert(&db, &record(InterventionLevel::FullScreen, fired))
+            .expect("写入");
+        InterventionRepo::resolve(&db, id, InterventionOutcome::Snoozed, Some(3), fired)
+            .expect("标记延后");
+
+        // 第 48 分钟：延后到点了，此时应当**没有**「最近一次打扰」挡路，
+        // 让决策引擎能重新开口（真正的静默期由 snooze_until 负责）
+        assert_eq!(
+            InterventionRepo::last_disturbing(&db).expect("查询"),
+            None,
+            "被延后的记录不该再作为「上次打扰」参与冷却计算 —— \
+             否则用户按了「3 分钟后」就再也等不到提醒"
+        );
+    }
+
+    /// 延后之后又有新的提醒发出，冷却要按**新**的那条算。
+    ///
+    /// 上一条测试保证了「延后不占冷却」，这条保证不会因此放过新记录。
+    #[test]
+    fn 延后之后的再次提醒会重新开始冷却() {
+        let db = Database::open_in_memory().expect("打开");
+
+        let fired = t0();
+        let id = InterventionRepo::insert(&db, &record(InterventionLevel::FullScreen, fired))
+            .expect("写入");
+        InterventionRepo::resolve(&db, id, InterventionOutcome::Snoozed, Some(3), fired)
+            .expect("标记延后");
+
+        // 延后到点后重新提醒了一次
+        let refired = fired.saturating_add_millis(3 * 60_000);
+        InterventionRepo::insert(&db, &record(InterventionLevel::FullScreen, refired))
+            .expect("写入");
+
+        let last = InterventionRepo::last_disturbing(&db)
+            .expect("查询")
+            .expect("应当有记录");
+
+        assert_eq!(last.fired_at, refired, "应当取延后之后那条新提醒的时刻");
     }
 
     #[test]

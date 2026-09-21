@@ -269,12 +269,21 @@ impl NeedCalculator {
 impl NeedLevel {
     /// 由「撑了间隔的多少倍」判定程度。
     fn from_ratio(ratio: f64) -> Self {
-        // 触发线 0.75 与 core 的 DEFAULT_TRIGGER_THRESHOLD 保持一致。
+        // 触发线 1.0 与 core 的 DEFAULT_TRIGGER_THRESHOLD 保持一致。
+        //
+        // ## 为什么是 1.0 而不是 0.75
+        //
+        // 这条线原来写的是 0.75，含义是「提前一点提醒更健康」。
+        // 但它和用户设的间隔对不上：设 45 分钟，第 34 分钟就显示「该提醒了」，
+        // 而用户在第 45 分钟抬头看时，这个判定已经不说明任何事了。
+        //
+        // 界面上写着「每 45 分钟提醒一次」，第 34 分钟就不该是「该提醒了」。
+        // 判定线、触发线、用户设的数字，三者必须一致。
         if ratio >= NEED_CEILING_MULTIPLIER {
             NeedLevel::Critical
         } else if ratio >= 2.0 {
             NeedLevel::Overdue
-        } else if ratio >= 0.75 {
+        } else if ratio >= 1.0 {
             NeedLevel::Due
         } else {
             NeedLevel::Low

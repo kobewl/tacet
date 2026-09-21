@@ -45,6 +45,7 @@ import {
   formatClock,
   reasonText,
   type IntentRecord,
+  type NeedKind,
   type TacetEvent,
 } from "../types";
 import "./BreakFlow.css";
@@ -83,14 +84,111 @@ const QUOTE_DELAY_MS = 10_000;
  */
 const QUOTE_ROTATE_MS = 60_000;
 
+/**
+ * 提醒弹出后，多久自动开始休息。
+ *
+ * ## 为什么需要这个倒计时
+ *
+ * 提醒弹出时，用户很可能**已经不在电脑前了** —— 他可能刚起身去接水、
+ * 或者正躺着。这种情况下，对着空椅子展示一个「现在休息」按钮没有任何意义：
+ * 等他回来，提醒早就过去了，休息也没被记上。
+ *
+ * 十秒是这么定的：够一个人看清屏幕上写了什么（如果他还在），
+ * 又不至于让已经离开的人白等。用户自己的说法是
+ * 「如果用户没有点击，可能正在休息，就可以自动进入休息了」。
+ *
+ * ## 为什么只给休息类用
+ *
+ * 四类提醒里，只有休息可以「替他决定」—— 因为**如果他不在，那说明
+ * 他多半已经在休息了**，倒计时只是把这件事记下来。
+ *
+ * 喝水 / 活动 / 远眺不行：用户不在时自动记一笔「喝了」，
+ * 是在**编造数据**。那会让「今天喝了 8 次水」变成一句假话，
+ * 而这类数字的全部价值就在于它是真的。
+ */
+const AUTO_REST_SECONDS = 10;
+
 export function BreakFlow() {
   const { snapshot, refresh } = useTacet();
   const [stage, setStage] = useState<Stage>("ask");
   const [intentText, setIntentText] = useState("");
   const [restoredIntent, setRestoredIntent] = useState<IntentRecord | null>(null);
 
+  /**
+   * 每次「被重新打开」自增一次，用来强制重播入场动画。
+   *
+   * ## 为什么需要它
+   *
+   * CSS 动画只在元素**挂载**时播放一次。而这个窗口的生命周期是
+   * 「隐藏 → 显示 → 隐藏」——DOM 一直挂着（见 `windows.rs` 里
+   * 「隐藏 ≠ 卸载网页」的说明），所以第二次提醒弹出时，蒙层会
+   * 直接以最终状态出现：用户看到的是白屏「啪」地一下，而不是
+   * 上一条提醒那种缓缓浮出的开场。
+   *
+   * 把它当 `key` 挂在蒙层和内容上，React 会在每次自增时重新创建
+   * 这两个节点，动画随之重播 —— 每一次提醒的开场都完整。
+   */
+  const [veilGeneration, setVeilGeneration] = useState(0);
+
+  /**
+   * 「现在休息」按钮上的自动倒计时（秒）。
+   *
+   * `null` 表示不在倒计时 —— 这是**常态**，非休息类提醒、以及用户
+   * 已经做过选择的场景都是它。数字表示还剩几秒。
+   *
+   * 它由「窗口被打开」这个事件启动（见下面 `breakShown` 的处理），
+   * 由任何一次用户操作取消。这两端都必须显式写，不能靠副作用自然停止 ——
+   * 窗口隐藏时网页**不会卸载**（`windows.rs` 里那条说明），
+   * 一个忘了取消的计时器会在用户看不见的地方把休息开起来。
+   */
+  const [autoRestSeconds, setAutoRestSeconds] = useState<number | null>(null);
+
   // 整个休息流程只允许提交一次 Intent
   const submitted = useRef(false);
+
+  /**
+   * 自动倒计时：每秒走一格。
+   *
+   * 用「链式 setTimeout」而不是 setInterval —— 每一拍由当前值调度下一拍，
+   * 于是取消这件事只需要把值置为 `null`，不需要在组件各处记得清 timer。
+   * `setInterval` 的写法要求每个取消点都调用一次 clearInterval，
+   * 漏一处就会留下一个继续跑的计时器。
+   */
+  useEffect(() => {
+    if (autoRestSeconds === null || autoRestSeconds <= 0) return;
+
+    const timer = window.setTimeout(() => {
+      setAutoRestSeconds((value) => (value === null ? null : value - 1));
+    }, 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [autoRestSeconds]);
+
+  /**
+   * 倒计时归零 → 自动开始休息。
+   *
+   * ## 为什么进的是「休息中」，而不是「填待办」
+   *
+   * 这个倒计时存在的理由是「用户多半已经离开了屏幕」（见
+   * `AUTO_REST_SECONDS` 的说明）。对着一个不在场的人问
+   * 「接下来准备做什么？」，等他回来只会看到一个没有意义的问题 ——
+   * 而且那时休息早就结束了，问题还挂在那里。
+   *
+   * 直接进休息中，他回来看到的是倒计时（或者已经结束的「欢迎回来」），
+   * 那是符合事实的：他确实休息了。
+   */
+  useEffect(() => {
+    if (autoRestSeconds !== 0) return;
+
+    // 先清掉，避免这一拍被重复执行
+    setAutoRestSeconds(null);
+
+    void (async () => {
+      await api.startBreak();
+      setStage("resting");
+      void refresh();
+    })();
+  }, [autoRestSeconds, refresh]);
 
   // 本地倒计时，从快照给的剩余秒数起步
   const remaining = useCountdown(snapshot?.breakRemainingSeconds ?? null);
@@ -106,6 +204,8 @@ export function BreakFlow() {
     }
   }, [stage, remaining]);
   const handleStartBreak = useCallback(async () => {
+    // 用户自己点了就不用倒计时了
+    setAutoRestSeconds(null);
     await api.startBreak();
     setStage("intent");
     void refresh();
@@ -127,11 +227,13 @@ export function BreakFlow() {
   }, [intentText, refresh]);
 
   const handleSkip = useCallback(async () => {
+    setAutoRestSeconds(null);
     await api.skipBreak();
     await api.closeCurrentWindow();
   }, []);
 
   const handleSnooze = useCallback(async (minutes: number) => {
+    setAutoRestSeconds(null);
     await api.snoozeBreak(minutes);
     await api.closeCurrentWindow();
   }, []);
@@ -159,6 +261,10 @@ export function BreakFlow() {
    * - `done` → 直接关窗。
    */
   const dismiss = useCallback(() => {
+    // Esc / 幕布点击同样属于「用户有反应」，倒计时随之取消 ——
+    // 否则会在用户已经明确表示要收起界面之后，偷偷把休息开起来。
+    setAutoRestSeconds(null);
+
     void (async () => {
       switch (stage) {
         case "ask":
@@ -250,6 +356,20 @@ export function BreakFlow() {
             setRestoredIntent(null);
             // 新一轮休息，允许重新提交一次 Intent
             submitted.current = false;
+            // 重播入场动画：这一次提醒也要有完整的开场
+            setVeilGeneration((n) => n + 1);
+
+            // 休息类提醒启动「不点就自动休息」的倒计时。
+            //
+            // 已经在休息中（`breaking`）时不启动：那种情况是用户
+            // 从主面板点了「现在休息」，界面正等着他填待办 ——
+            // 此刻再倒计时等于替他跳过了那个问题。
+            //
+            // 非休息类（喝水等）也不启动，理由见 `AUTO_REST_SECONDS`：
+            // 那会变成替他编造一次「喝了」。
+            const kind = next.lastDecision?.kind ?? "rest";
+            const shouldAutoRest = next.state !== "breaking" && kind === "rest";
+            setAutoRestSeconds(shouldAutoRest ? AUTO_REST_SECONDS : null);
           })();
         }
       })
@@ -337,10 +457,18 @@ export function BreakFlow() {
 
   return (
     <div className="break-stage">
+      {/* 蒙住整个屏幕的那一层。它单独成层只为一件事：渐入。
+          用户看到的是屏幕**慢慢**被蒙住，而不是「啪」地一下白屏盖脸。
+          `key` 让每次提醒重新挂载它，动画因而每次都完整播放。
+
+          类名是 break-backdrop 而不是 break-veil —— 后者是副屏幕布
+          已经占用的名字，重名会让两个样式互相污染（真实踩过）。 */}
+      <div className="break-backdrop" key={`veil-${veilGeneration}`} aria-hidden />
+
       {/* 呼吸引导环：背景层，始终在，但很淡 */}
       {stage === "resting" ? <div className="break-breathe" aria-hidden /> : null}
 
-      <div className="break-content">
+      <div className="break-content" key={veilGeneration}>
         {stage === "ask" ? (
           <AskStage
             snapshot={snapshot}
@@ -348,6 +476,7 @@ export function BreakFlow() {
             onSnooze={(minutes) => void handleSnooze(minutes)}
             onSkip={() => void handleSkip()}
             snoozeOptions={snoozeOptions}
+            autoRestSeconds={autoRestSeconds}
           />
         ) : null}
 
@@ -408,7 +537,52 @@ interface AskStageProps {
   onSnooze: (minutes: number) => void;
   onSkip: () => void;
   snoozeOptions: number[];
+  /** 自动休息的剩余秒数；`null` 表示没有在倒计时。 */
+  autoRestSeconds: number | null;
 }
+
+/**
+ * 每类需求在这一屏上的说法与主按钮文案。
+ *
+ * ## 为什么四类需求共用这一屏，而不是各做一个界面
+ *
+ * 它们是同一种东西：**一句话 + 一组出口**。差别只在文案和主按钮 ——
+ * 为四种文案维护四套布局，会立刻带来「改了休息的间距，喝水那屏忘了改」
+ * 这类不一致。
+ *
+ * ## 主按钮为什么分两种行为
+ *
+ * - **休息**：点击后进入「填待办 → 倒计时」的完整流程，因为休息是一件
+ *   需要离开屏幕几分钟的**大事**。
+ * - **喝水 / 活动 / 远眺**：点击即完成打卡。这几件事都是「顺手就能做」，
+ *   弹窗本身已经起到了提醒作用 —— 再让用户走一遍流程，就成了
+ *   为了记录而记录。
+ */
+const ASK_COPY: Record<
+  NeedKind,
+  { title: string; done: string; fallbackFact: string }
+> = {
+  rest: {
+    title: "建议休息一下",
+    done: "现在休息",
+    fallbackFact: "连续工作了一段时间，该歇一会儿了",
+  },
+  hydration: {
+    title: "该喝点水了",
+    done: "喝了",
+    fallbackFact: "有一阵子没喝水了",
+  },
+  movement: {
+    title: "起来活动一下",
+    done: "活动过了",
+    fallbackFact: "坐得有点久了，起身走两步",
+  },
+  eyeRest: {
+    title: "让眼睛歇一会儿",
+    done: "远眺过了",
+    fallbackFact: "看屏幕太久了，看看远处",
+  },
+};
 
 function AskStage({
   snapshot,
@@ -416,8 +590,14 @@ function AskStage({
   onSnooze,
   onSkip,
   snoozeOptions,
+  autoRestSeconds,
 }: AskStageProps) {
   const decision = snapshot.lastDecision;
+
+  // 这次是为了哪类需求。拿不到决策时按休息处理 —— 它是产品的
+  // 主场景，也是最「重」的一类，退化成它最安全。
+  const kind: NeedKind = decision?.kind ?? "rest";
+  const copy = ASK_COPY[kind];
 
   // 「为什么现在提醒我」—— 交互原则 5：提醒卡片上永远能找到理由。
   const why = decision?.reasons ?? [];
@@ -427,9 +607,26 @@ function AskStage({
       reason.reason !== "need_below_threshold" &&
       reason.reason !== "context_unavailable",
   );
+
+  /**
+   * 非休息类的主按钮：打卡 + 关窗。
+   *
+   * 打卡走的是和主面板「+1 杯水」完全相同的命令 ——
+   * 记录行为、重置需求、广播快照，一件事都不少。
+   * 关窗放在之后：先记账，再退场。
+   */
+  const handleDone = () => {
+    void (async () => {
+      if (kind === "hydration") await api.logWater();
+      else if (kind === "movement") await api.logActivity();
+      else if (kind === "eyeRest") await api.logEyeRest();
+      await api.closeCurrentWindow();
+    })();
+  };
+
   return (
-    <div className="stage-ask">
-      <h1 className="ask-title">建议休息一下</h1>
+    <div className={`stage-ask stage-ask-${kind}`}>
+      <h1 className="ask-title">{copy.title}</h1>
 
       <div className="ask-facts">
         {facts.length > 0 ? (
@@ -442,14 +639,40 @@ function AskStage({
         ) : (
           <div className="ask-fact">
             <span className="ask-fact-dot" aria-hidden />
-            <span>连续工作了一段时间，该歇一会儿了</span>
+            <span>{copy.fallbackFact}</span>
           </div>
         )}
       </div>
 
       <div className="ask-actions">
-        <button className="btn btn-primary ask-primary" onClick={onStart}>
-          现在休息
+        {/* 主按钮：休息类带自动倒计时。
+            倒计时用「从右往左退去的填充」表达，而不是在按钮里塞一个数字。
+            理由是这一屏的主按钮本来就够显眼，再挂一个跳动的秒数会变成
+            视觉焦点 —— 而这一屏希望用户看完就走，不是盯着按钮。 */}
+        <button
+          className={`btn btn-primary ask-primary${
+            autoRestSeconds !== null ? " ask-primary-auto" : ""
+          }`}
+          onClick={kind === "rest" ? onStart : handleDone}
+        >
+          {autoRestSeconds !== null ? (
+            <>
+              <span
+                className="ask-primary-fill"
+                style={{
+                  // 剩余的百分比：满了是 100%，归零时是 0%
+                  width: `${(autoRestSeconds / AUTO_REST_SECONDS) * 100}%`,
+                }}
+                aria-hidden
+              />
+              <span className="ask-primary-text">
+                {copy.done}
+                <span className="ask-primary-count">{autoRestSeconds}</span>
+              </span>
+            </>
+          ) : (
+            copy.done
+          )}
         </button>
 
         <div className="ask-secondary">
@@ -469,6 +692,14 @@ function AskStage({
           这次不用
         </button>
       </div>
+
+      {/* 倒计时在做什么，得说清楚 —— 否则用户看着按钮上的数字变小时
+          会以为这是个必须等完的进度条，而不是「不点会发生什么」的预告。 */}
+      {autoRestSeconds !== null ? (
+        <p className="sub ask-auto-hint">
+          {autoRestSeconds} 秒后自动开始休息（你不在的话，就当已经休息了）
+        </p>
+      ) : null}
     </div>
   );
 }

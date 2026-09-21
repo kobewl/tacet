@@ -537,6 +537,27 @@ export function Settings() {
             间隔范围 {MIN_INTERVAL}~{MAX_INTERVAL} 分钟。任何时候都可以跳过一次提醒，
             不会影响统计。
           </p>
+
+          {/* 预览入口 —— 「我设了 45 分钟，但它到底长什么样？」
+              等 45 分钟太久了，所以给一个立刻能看到的方式。
+              四类都给按钮：它们在那一屏上的文案和主按钮都不一样，
+              只看休息的话，另外三类等于没人验证过。 */}
+          <div className="settings-preview">
+            <span className="sub settings-preview-label">看看提醒长什么样</span>
+            <div className="settings-preview-actions">
+              {(["rest", "hydration", "movement", "eyeRest"] as const).map(
+                (kind) => (
+                  <button
+                    key={kind}
+                    className="btn btn-quiet"
+                    onClick={() => void api.previewReminder(kind)}
+                  >
+                    {NEED_META[kind].icon} {NEED_META[kind].label}
+                  </button>
+                ),
+              )}
+            </div>
+          </div>
         </section>
 
         {/* ---------------------------------------------- 节奏 */}

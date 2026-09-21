@@ -310,6 +310,29 @@
   color: var(--text-quaternary);
 }
 
+/**
+ * 预览入口。
+ *
+ * 刻意不做成主按钮：它是「想看看」的动作，不是设置流程的一环 ——
+ * 给它和保存同等的视觉重量，会让人以为「不点一下就设置不生效」。
+ */
+.settings-preview {
+  margin: 18px 2px 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-hair);
+}
+
+.settings-preview-label {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.settings-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .settings-footer {
   display: flex;
   align-items: center;

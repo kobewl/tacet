@@ -39,10 +39,23 @@ use crate::time::{Timestamp, MINUTE};
 
 /// 需求分数达到多少就该开口。
 ///
-/// 为什么是 0.75 而不是 1.0：需求分数是「紧迫程度」而不是「倒计时归零」。
-/// 等它涨到 1.0 意味着已经严重超时，那时候再提醒就太晚了。
-/// 0.75 大致对应「刚过提醒间隔」的位置，是产品和医学上都比较舒服的时机。
-pub const DEFAULT_TRIGGER_THRESHOLD: f64 = 0.75;
+/// ## 为什么从 0.75 改成了 1.0
+///
+/// 这个常量原本是 0.75，理由是「等涨到 1.0 再提醒就太晚了」。
+/// 听起来合理，但它和用户在设置页看到的那句话**直接打架**：
+///
+/// > 休息：每 45 分钟提醒一次
+///
+/// 用户设了 45，就会等到第 45 分钟。而 0.75 让提醒在第 34 分钟就来了 ——
+/// 用户的实际感受是「我明明设的 45 分钟，你怎么 34 分钟就弹」，
+/// 或者更糟：他低头做事没看见，第 45 分钟抬头时反而什么都没有。
+///
+/// 真实数据印证了这一点：`interventions` 表里连续多条记录都是
+/// 「连续工作 34 分钟」（设的是 45），用户报的正是「到点没提醒我」。
+///
+/// 设置页写的是几分钟，就几分钟 —— 数字要对得上，这比「提前一点更健康」
+/// 的论据更重要。一个不说谎的 45 分钟，比一个善意的 34 分钟可信。
+pub const DEFAULT_TRIGGER_THRESHOLD: f64 = 1.0;
 
 /// 同类提醒之间的**最小**冷却时间（PRD §3.3 通用约束 4）。
 ///
@@ -59,21 +72,31 @@ pub const MIN_COOLDOWN_MS: i64 = 10 * MINUTE;
 
 /// 冷却时间占用户设定间隔的比例。
 ///
-/// 为什么是 60%：用户在 60 分钟这个刻度上，通常想要的是
-/// 「大概每小时被提一次」。如果把冷却设成等于间隔，那么一次提醒之后
-/// 必须整整等满一小时才可能再次提醒 —— 而需求分数是连续上升的，
-/// 这会导致提醒实际间隔被拉长到远超设定值。
+/// ## 为什么从 60% 改成了 100%
 ///
-/// 取 60% 的效果：设 60 分钟 → 冷却 36 分钟，实际的提醒节奏
-/// 落在「比设定略紧一点」的位置，符合直觉。
-const COOLDOWN_RATIO: f64 = 0.6;
+/// 配合 [`DEFAULT_TRIGGER_THRESHOLD`] 从 0.75 提到 1.0，这个比例也必须跟上，
+/// 否则会出现一种很难自查的怪事：
+///
+/// ```text
+///   设 45 分钟，第 45 分钟弹提醒        ← 触发线 1.0，准时
+///   用户没理它，继续干活
+///   第 72 分钟（45 + 27）又弹一次       ← 冷却 60%，比设定值密
+///   第 99 分钟再弹一次
+/// ```
+///
+/// 用户设的是「每 45 分钟提醒一次」，实际却每 27 分钟被拦一次 ——
+/// 又回到了「我设的 45 分钟根本没用」那个老问题上。
+///
+/// 取 100% 之后，节奏是干净的：提醒过就等满一个间隔，
+/// 到点还没休息才再说一次。设置页写 45，实际就是 45。
+const COOLDOWN_RATIO: f64 = 1.0;
 
 /// 按用户设定的提醒间隔算出冷却时长。
 ///
 /// 见 [`MIN_COOLDOWN_MS`] 里对「为什么不是固定值」的说明。
 pub fn cooldown_for(interval_minutes: u32) -> i64 {
     let scaled = (interval_minutes as f64 * COOLDOWN_RATIO) as i64 * MINUTE;
-    // 下限兜底：用户设 5 分钟间隔时，60% 只有 3 分钟 —— 太密了。
+    // 下限兜底：用户设 5 分钟间隔时，冷却也是 5 分钟 —— 太密了。
     scaled.max(MIN_COOLDOWN_MS)
 }
 
@@ -216,15 +239,12 @@ impl InterventionDecision {
 pub struct PolicyEngine {
     /// 触发提醒的需求阈值。
     trigger_threshold: f64,
-    /// 需求极高时，即使场景不适合也至少给一个环境提示的阈值。
-    urgent_threshold: f64,
 }
 
 impl Default for PolicyEngine {
     fn default() -> Self {
         Self {
             trigger_threshold: DEFAULT_TRIGGER_THRESHOLD,
-            urgent_threshold: 0.95,
         }
     }
 }
@@ -236,10 +256,18 @@ impl PolicyEngine {
     }
 
     /// 自定义触发阈值（v0.2 起会由用户模型动态调整）。
-    pub fn with_threshold(trigger_threshold: f64, urgent_threshold: f64) -> Self {
+    ///
+    /// ## 曾经还有一个 `urgent_threshold` 参数
+    ///
+    /// 它用来判断「需求是否高到该升级为全屏」。现在等级不由分数决定了
+    /// （见 [`Self::choose_level`]），这个参数失去了依据，所以删掉 ——
+    /// 留着一个没人读的旋钮，比没有这个旋钮更容易误导人。
+    ///
+    /// 现在需要「紧急」这个判断的是**时机窗口**（`tacet_health::window`），
+    /// 它由调用方按分数自行判断，与引擎无关。
+    pub fn with_threshold(trigger_threshold: f64) -> Self {
         Self {
             trigger_threshold: trigger_threshold.clamp(0.0, 1.0),
-            urgent_threshold: urgent_threshold.clamp(0.0, 1.0),
         }
     }
 
@@ -385,70 +413,36 @@ impl PolicyEngine {
         reasons
     }
 
-    /// 决定用哪一级干预，以及这么决定的理由。
+    /// 决定用哪一级干预。
     ///
-    /// 这是「健康需求 × 可打扰度」第一次真正落地的地方。
-    /// v0.1 只有两个可打扰度因子（全屏、专注型应用），但决策的**形状**
-    /// 已经是完整的：需求越高越想用强手段，场景越敏感越要压低。
+    /// ## v0.1.2：整屏提醒成为唯一的形态
     ///
-    /// 返回值里的第二个元素是**降级理由**：它是给用户看的解释，
-    /// 说明「为什么这次只用了通知而不是全屏」。返回 `None` 级别的场景
-    /// （即没有发生降级）返回空数组。
+    /// 早期版本按「场景敏不敏感」分了两条路：在编辑器 / 终端里（判定为心流）
+    /// 或前台应用全屏时，把提醒降级成系统通知，「免得打断用户」。
+    /// 这条规则在实践中被证明是错的，有两个理由：
+    ///
+    /// **一、它替用户做了本该他做的决定。** 用户装这个应用的全部目的
+    /// 就是被打断。「现在方不方便」这件事交给程序去猜，不如弹出来让他
+    /// 自己按「几分钟后」。真实反馈：
+    /// 「我在使用 zcode 也得生效啊，如果忙我会点击几分钟后休息」。
+    ///
+    /// **二、降级后的那条路是断的。** 降级的目标是系统通知，而通知在
+    /// 这套签名下弹不出横幅（原因见 `windows::send_notification`）。
+    /// 于是「降级」等于「静默」—— 用户在最需要提醒的专注场景里，
+    /// 反而一次都收不到。降级本意是「轻一点」，实际效果是「没有」。
+    ///
+    /// 所以现在不问场景，到点就整屏提醒。留下的唯一分级余地是
+    /// v0.2 的会议检测（`ContextSnapshot::meeting_probability`，v0.1 恒为 0）
+    /// 与 Escalated 升级提醒 —— 到那时再按新的因子重新引入分级。
+    ///
+    /// 参数暂时保留：调用方不用改，v0.2 重新引入分级时也会用到它们。
     fn choose_level(
         &self,
-        kind: NeedKind,
-        score: NeedScore,
-        input: &DecisionInput,
+        _kind: NeedKind,
+        _score: NeedScore,
+        _input: &DecisionInput,
     ) -> (InterventionLevel, Vec<Reason>) {
-        let gentle_scene = input.context.prefers_gentle_intervention();
-        let urgent = score.at_least(self.urgent_threshold);
-
-        // 场景不适合强打断时，最高只能到系统通知。
-        if gentle_scene {
-            let mut reasons = Vec::new();
-
-            if input.context.fullscreen {
-                reasons.push(Reason::AppFullscreen {
-                    app: input.context.app_name().to_string(),
-                });
-            } else if let Some(app) = input.context.foreground_app.as_ref() {
-                if app.category.implies_focus() {
-                    reasons.push(Reason::AppFullscreen {
-                        app: app.name.clone(),
-                    });
-                }
-            }
-
-            // 需求已经很高了（或者命中了明确的场景因子）：不能什么都不做，
-            // 但也不该全屏弹窗 —— 用户正在全屏看演示 / 开会 / 写代码，
-            // 一个全屏提醒会让他很难堪。
-            let level = if urgent || !reasons.is_empty() {
-                InterventionLevel::Notification
-            } else {
-                InterventionLevel::Ambient
-            };
-
-            return (level, reasons);
-        }
-
-        // 休息类提醒用全屏（这是产品的主场景，v0.1 的核心闭环）。
-        // 其它三类用系统通知：喝水、起身、远眺都是「顺手就能做」的小事，
-        // 为它们全屏覆盖用户的屏幕，打断成本远大于健康收益。
-        let level = match kind {
-            NeedKind::Rest => {
-                if urgent {
-                    InterventionLevel::FullScreen
-                } else {
-                    InterventionLevel::Notification
-                }
-            }
-            NeedKind::Hydration | NeedKind::Movement | NeedKind::EyeRest => {
-                InterventionLevel::Notification
-            }
-            NeedKind::Fused => InterventionLevel::Notification,
-        };
-
-        (level, Vec::new())
+        (InterventionLevel::FullScreen, Vec::new())
     }
 }
 
@@ -521,9 +515,9 @@ mod tests {
     }
 
     #[test]
-    fn 需求越过阈值且场景合适时全屏提醒休息() {
+    fn 需求越过阈值时全屏提醒休息() {
         let engine = PolicyEngine::new();
-        let input = base_input(needs_with(NeedKind::Rest, 0.95));
+        let input = base_input(needs_with(NeedKind::Rest, 1.0));
 
         let decision = engine.decide(&input);
 
@@ -533,9 +527,27 @@ mod tests {
         assert!(!decision.actions.is_empty(), "提醒必须给出具体可做的事");
     }
 
+    /// 回归测试：全屏场景下**照样**弹全屏提醒。
+    ///
+    /// ## 这条测试守的是一个被推翻的旧结论
+    ///
+    /// 早期版本在这里断言的是「全屏场景下降级为通知」，理由是
+    /// 「用户可能正在放演示、看视频、开线上会议，全屏覆盖是灾难」。
+    ///
+    /// 那个判断错在两点上，都由真实使用暴露出来：
+    ///
+    /// 1. **降级后的那条路是断的。** 降级目标是系统通知，而通知在
+    ///    这套签名下弹不出横幅 —— 于是「降级」实际等于「静默」，
+    ///    用户在专注场景里一次都收不到提醒。
+    /// 2. **它替用户做了本该他做的决定。** 用户要的是「到点提醒我，
+    ///    忙不忙我自己判断」；他手上有「3 分钟后」「这次不用」两个出口，
+    ///    不需要程序替他屏蔽。
+    ///
+    /// 现在断言反过来：`fullscreen` 这个字段不再影响等级。
+    /// 未来若要做场景降级（v0.2 的会议检测），必须是**新因子 + 新出口**，
+    /// 不能简单地把提醒降成一条用户看不见的东西。
     #[test]
-    fn 全屏场景下绝不弹全屏提醒() {
-        // 用户可能正在放演示、看视频、开线上会议。全屏覆盖是灾难。
+    fn 全屏场景下照样弹全屏提醒() {
         let engine = PolicyEngine::new();
         let mut input = base_input(needs_with(NeedKind::Rest, 1.0));
         input.context.fullscreen = true;
@@ -547,21 +559,31 @@ mod tests {
 
         let decision = engine.decide(&input);
 
-        assert_eq!(decision.level, InterventionLevel::Notification);
+        assert_eq!(
+            decision.level,
+            InterventionLevel::FullScreen,
+            "用户正在全屏工作时也必须收得到提醒 —— 这条曾经被降级成看不见的通知"
+        );
         assert!(
-            decision
+            !decision
                 .reasons
                 .iter()
                 .any(|r| matches!(r, Reason::AppFullscreen { .. })),
-            "降级的理由必须写清楚，用户才知道系统考虑过他的处境"
+            "既然不再降级，就不该再声称「因为你在全屏所以降级了」"
         );
     }
 
+    /// 回归测试：在编辑器（心流场景）里也**不**降级。
+    ///
+    /// 用户原话：「我在使用 zcode 也得生效啊，如果忙我会点击几分钟后休息」。
+    ///
+    /// 这条曾经是 bug 的现场：ZCode 的显示名里含 "code"，被
+    /// `tacet_context::category` 归类成 `Editor`，于是每一次提醒都被
+    /// 降级成那条看不见的通知 —— 用户在 ZCode 里**永远**收不到提醒。
     #[test]
-    fn 编辑器里工作时降级为通知() {
-        // 写代码时突然被全屏盖住，是这类产品最招人恨的行为。
+    fn 编辑器里工作时不降级() {
         let engine = PolicyEngine::new();
-        let mut input = base_input(needs_with(NeedKind::Rest, 0.99));
+        let mut input = base_input(needs_with(NeedKind::Rest, 1.0));
         input.context.foreground_app = Some(ForegroundApp::new(
             "com.microsoft.VSCode",
             "Visual Studio Code",
@@ -570,7 +592,11 @@ mod tests {
 
         let decision = engine.decide(&input);
 
-        assert_eq!(decision.level, InterventionLevel::Notification);
+        assert_eq!(
+            decision.level,
+            InterventionLevel::FullScreen,
+            "写代码时也得到点就提醒；忙不忙由用户自己按「几分钟后」决定"
+        );
     }
 
     #[test]
@@ -597,10 +623,10 @@ mod tests {
     #[test]
     fn 冷却期内同类提醒不重复发出() {
         let engine = PolicyEngine::new();
-        let mut input = base_input(needs_with(NeedKind::Hydration, 0.9));
+        let mut input = base_input(needs_with(NeedKind::Hydration, 1.0));
         input.recent.last_intervention = Some(InterventionRecap {
             kind: NeedKind::Hydration,
-            level: InterventionLevel::Notification,
+            level: InterventionLevel::FullScreen,
             fired_at: t0().saturating_sub_millis(4 * MINUTE),
         });
 
@@ -619,17 +645,17 @@ mod tests {
     #[test]
     fn 冷却期过去后可以再次提醒() {
         let engine = PolicyEngine::new();
-        let mut input = base_input(needs_with(NeedKind::Hydration, 0.9));
-        // 默认间隔 45 分钟 → 冷却 27 分钟。放到 30 分钟之前，应当已过冷却。
+        let mut input = base_input(needs_with(NeedKind::Hydration, 1.0));
+        // 默认间隔 45 分钟 → 冷却也是 45 分钟。放到 46 分钟之前，应当已过冷却。
         input.recent.last_intervention = Some(InterventionRecap {
             kind: NeedKind::Hydration,
-            level: InterventionLevel::Notification,
-            fired_at: t0().saturating_sub_millis(30 * MINUTE),
+            level: InterventionLevel::FullScreen,
+            fired_at: t0().saturating_sub_millis(46 * MINUTE),
         });
 
         assert_eq!(
             engine.decide(&input).level,
-            InterventionLevel::Notification,
+            InterventionLevel::FullScreen,
             "超过冷却期后应当可以再次提醒"
         );
     }
@@ -645,33 +671,33 @@ mod tests {
     ///
     /// ## 现在的行为
     ///
-    /// 冷却时长 = 用户间隔 × 0.6（下限 10 分钟）。
-    /// 所以间隔调大之后，同样的「上次提醒在 15 分钟前」，
-    /// 在默认间隔下会放行，在 120 分钟间隔下会被拦住。
+    /// 冷却时长 = 用户间隔 × 1.0（下限 10 分钟）。
+    /// 所以间隔调大之后，同样的「上次提醒在 20 分钟前」，
+    /// 在 20 分钟间隔下会放行，在 120 分钟间隔下会被拦住。
     #[test]
     fn 间隔调大后冷却期跟着变长() {
         let engine = PolicyEngine::new();
 
         let make_input = |interval_minutes: u32| {
-            let mut input = base_input(needs_with(NeedKind::Hydration, 0.9));
+            let mut input = base_input(needs_with(NeedKind::Hydration, 1.0));
             input.preferences.reminders.hydration.interval_minutes = interval_minutes;
             // 上次喝水提醒是 20 分钟前
             input.recent.last_intervention = Some(InterventionRecap {
                 kind: NeedKind::Hydration,
-                level: InterventionLevel::Notification,
+                level: InterventionLevel::FullScreen,
                 fired_at: t0().saturating_sub_millis(20 * MINUTE),
             });
             input
         };
 
-        // 间隔 20 分钟 → 冷却 12 分钟 → 20 分钟前那次已经过了冷却，可以提醒
+        // 间隔 20 分钟 → 冷却 20 分钟 → 20 分钟前那次刚好出冷却，可以提醒
         assert_eq!(
             engine.decide(&make_input(20)).level,
-            InterventionLevel::Notification,
+            InterventionLevel::FullScreen,
             "间隔设得短，20 分钟后应当可以再次提醒"
         );
 
-        // 间隔 120 分钟 → 冷却 72 分钟 → 20 分钟前那次还在冷却里，保持安静
+        // 间隔 120 分钟 → 冷却 120 分钟 → 20 分钟前那次还在冷却里，保持安静
         assert_eq!(
             engine.decide(&make_input(120)).level,
             InterventionLevel::Silent,
@@ -682,35 +708,34 @@ mod tests {
     /// 无论用户怎么设，都不允许把提醒频率调到「轰炸」级别。
     #[test]
     fn 冷却时间有下限兜底() {
-        // 间隔设成最小值 5 分钟：5 × 0.6 = 3 分钟，但下限是 10 分钟
+        // 间隔设成最小值 5 分钟：冷却 5 分钟，但下限是 10 分钟
         assert_eq!(cooldown_for(5), MIN_COOLDOWN_MS);
 
-        // 间隔 60 分钟：60 × 0.6 = 36 分钟
-        assert_eq!(cooldown_for(60), 36 * MINUTE);
+        // 间隔 60 分钟 → 冷却 60 分钟（与设置值 1:1，不再打折）
+        assert_eq!(cooldown_for(60), 60 * MINUTE);
 
-        // 间隔 240 分钟（上限）：240 × 0.6 = 144 分钟
-        assert_eq!(cooldown_for(240), 144 * MINUTE);
+        // 间隔 240 分钟（上限）→ 冷却 240 分钟
+        assert_eq!(cooldown_for(240), 240 * MINUTE);
     }
 
     #[test]
     fn 冷却期只针对同一类需求() {
         // 上次提醒的是喝水，这次要提醒活动，不该被拦。
         let engine = PolicyEngine::new();
-        let mut input = base_input(needs_with(NeedKind::Movement, 0.9));
+        let mut input = base_input(needs_with(NeedKind::Movement, 1.0));
         input.recent.last_intervention = Some(InterventionRecap {
             kind: NeedKind::Hydration,
-            level: InterventionLevel::Notification,
+            level: InterventionLevel::FullScreen,
             fired_at: t0().saturating_sub_millis(MINUTE),
         });
 
-        assert_eq!(engine.decide(&input).level, InterventionLevel::Notification);
+        assert_eq!(engine.decide(&input).level, InterventionLevel::FullScreen);
     }
 
     #[test]
     fn 用户延后期间保持安静() {
         let engine = PolicyEngine::new();
-        // 需求 0.80：已过提醒线（0.75）但还没到紧急线（0.95）
-        let mut input = base_input(needs_with(NeedKind::Rest, 0.80));
+        let mut input = base_input(needs_with(NeedKind::Rest, 1.0));
         input.recent.snoozed_until = Some(t0().saturating_add_millis(3 * MINUTE));
 
         let decision = engine.decide(&input);
@@ -724,8 +749,8 @@ mod tests {
         input.now = t0().saturating_add_millis(4 * MINUTE);
         assert_eq!(
             engine.decide(&input).level,
-            InterventionLevel::Notification,
-            "需求还没到紧急线时，延后结束后先用通知"
+            InterventionLevel::FullScreen,
+            "延后结束后应当重新提醒 —— 这是「3 分钟后」真正兑现的地方"
         );
     }
 
@@ -738,19 +763,32 @@ mod tests {
         assert_eq!(engine.decide(&input).level, InterventionLevel::FullScreen);
     }
 
+    /// 四类提醒一律整屏，不再有「小事只配得到通知」的分别。
+    ///
+    /// 早期版本让喝水 / 起身 / 远眺走系统通知，理由是「顺手能做的小事，
+    /// 全屏盖屏幕不成比例」。但那条路在真实环境里是断的（通知弹不出横幅），
+    /// 于是这三类提醒**从来没有真正送达过用户**。
+    ///
+    /// 现在统一走整屏的那一屏 —— 它对四类需求都提供可点的出口
+    /// （喝水类给「喝了」，休息类给「现在休息」），成本是多看两秒，
+    /// 换的是「提醒真的送到了」。
     #[test]
-    fn 非休息类需求用通知而不是全屏() {
-        // 喝水、起身、远眺都是顺手能做的小事，全屏盖住屏幕是不成比例的。
+    fn 四类需求统一用整屏提醒() {
         let engine = PolicyEngine::new();
 
-        for kind in [NeedKind::Hydration, NeedKind::Movement, NeedKind::EyeRest] {
+        for kind in [
+            NeedKind::Rest,
+            NeedKind::Hydration,
+            NeedKind::Movement,
+            NeedKind::EyeRest,
+        ] {
             let input = base_input(needs_with(kind, 1.0));
             let decision = engine.decide(&input);
 
             assert_eq!(
                 decision.level,
-                InterventionLevel::Notification,
-                "{kind:?} 应当用通知而非全屏"
+                InterventionLevel::FullScreen,
+                "{kind:?} 应当用整屏提醒"
             );
             assert_eq!(decision.kind, kind);
         }
@@ -760,9 +798,9 @@ mod tests {
     fn 多条需求同时超过阈值时取最急的那个() {
         let engine = PolicyEngine::new();
         let needs = HealthNeeds {
-            rest: NeedScore::new(0.80),
-            hydration: NeedScore::new(0.99),
-            movement: NeedScore::new(0.85),
+            rest: NeedScore::new(0.90),
+            hydration: NeedScore::new(1.0),
+            movement: NeedScore::new(0.95),
             eye_rest: NeedScore::new(0.50),
         };
 
@@ -773,7 +811,7 @@ mod tests {
     #[test]
     fn 理由里带上真实的时间线信息() {
         let engine = PolicyEngine::new();
-        let mut input = base_input(needs_with(NeedKind::Hydration, 0.9));
+        let mut input = base_input(needs_with(NeedKind::Hydration, 1.0));
         input.recent.last_water_logged_at = Some(t0().saturating_sub_millis(93 * MINUTE));
 
         let decision = engine.decide(&input);
@@ -784,7 +822,7 @@ mod tests {
             "应当说明距上次喝水 93 分钟，实际文案：{lines:?}"
         );
         assert!(
-            lines.iter().any(|l| l.contains("90%")),
+            lines.iter().any(|l| l.contains("100%")),
             "应当说明需求强度，实际文案：{lines:?}"
         );
     }
@@ -792,7 +830,7 @@ mod tests {
     #[test]
     fn 休息类提醒的理由包含连续工作时长() {
         let engine = PolicyEngine::new();
-        let mut input = base_input(needs_with(NeedKind::Rest, 0.9));
+        let mut input = base_input(needs_with(NeedKind::Rest, 1.0));
         input.continuous_work_minutes = 78;
 
         let decision = engine.decide(&input);
@@ -803,7 +841,7 @@ mod tests {
     #[test]
     fn 决策可以转成待落库的干预记录() {
         let engine = PolicyEngine::new();
-        let input = base_input(needs_with(NeedKind::Rest, 0.95));
+        let input = base_input(needs_with(NeedKind::Rest, 1.0));
 
         let decision = engine.decide(&input);
         let record = decision.to_intervention(input.now);
@@ -821,10 +859,10 @@ mod tests {
         // HashMap、随机数或者「当前时间」这类隐藏输入。
         let engine = PolicyEngine::new();
         let input = base_input(HealthNeeds {
-            rest: NeedScore::new(0.9),
-            hydration: NeedScore::new(0.9),
-            movement: NeedScore::new(0.9),
-            eye_rest: NeedScore::new(0.9),
+            rest: NeedScore::new(1.0),
+            hydration: NeedScore::new(1.0),
+            movement: NeedScore::new(1.0),
+            eye_rest: NeedScore::new(1.0),
         });
 
         let first = engine.decide(&input);
@@ -835,22 +873,61 @@ mod tests {
 
     #[test]
     fn 自定义阈值生效() {
-        let engine = PolicyEngine::with_threshold(0.5, 0.9);
+        let engine = PolicyEngine::with_threshold(0.5);
         let input = base_input(needs_with(NeedKind::Rest, 0.6));
 
         assert_eq!(
             engine.decide(&input).level,
-            InterventionLevel::Notification,
+            InterventionLevel::FullScreen,
             "阈值降到 0.5 后，0.6 的需求应当触发提醒"
+        );
+    }
+
+    /// 触发线必须与用户设的间隔 1:1 对齐。
+    ///
+    /// 这条测试盯住的是用户报的那个问题：「我设的 45 分钟，
+    /// 为什么到点没提醒」。答案曾经是触发线被打了 0.75 的折 ——
+    /// 设 45 分钟实际第 34 分钟就触发，用户在第 45 分钟抬头时
+    /// 反而什么都没有。
+    #[test]
+    fn 触发线等于用户设定的间隔不做折扣() {
+        assert_eq!(
+            DEFAULT_TRIGGER_THRESHOLD, 1.0,
+            "触发线一旦低于 1.0，用户设的分钟数就不再是实际提醒的分钟数"
+        );
+
+        let engine = PolicyEngine::new();
+
+        // 差一点点（0.99）：还不该提醒。对应用户设 45 分钟、现在第 44 分钟。
+        assert_eq!(
+            engine
+                .decide(&base_input(needs_with(NeedKind::Rest, 0.99)))
+                .level,
+            InterventionLevel::Silent,
+            "差一分钟就是差一分钟，不该提前开口"
+        );
+
+        // 到点（1.0）：提醒。对应第 45 分钟整。
+        assert_eq!(
+            engine
+                .decide(&base_input(needs_with(NeedKind::Rest, 1.0)))
+                .level,
+            InterventionLevel::FullScreen,
+            "到点就该提醒"
         );
     }
 
     #[test]
     fn 阈值被夹取到合法区间() {
-        let engine = PolicyEngine::with_threshold(-1.0, 5.0);
-        // 阈值 -1 → 0，任何正需求都触发；紧急阈值 5 → 1
-        let input = base_input(needs_with(NeedKind::Rest, 1.0));
+        let engine = PolicyEngine::with_threshold(-1.0);
+        // 阈值 -1 → 0，任何正需求都触发
+        let input = base_input(needs_with(NeedKind::Rest, 0.01));
         assert_eq!(engine.decide(&input).level, InterventionLevel::FullScreen);
+
+        let engine = PolicyEngine::with_threshold(5.0);
+        // 阈值 5 → 1，只有拉满才触发
+        let input = base_input(needs_with(NeedKind::Rest, 0.99));
+        assert_eq!(engine.decide(&input).level, InterventionLevel::Silent);
     }
 
     #[test]
@@ -870,24 +947,27 @@ mod tests {
     fn 未知上下文不影响基本判断() {
         // 渐进增强原则：拿不到上下文时，系统要照常工作。
         let engine = PolicyEngine::new();
-        let input = base_input(needs_with(NeedKind::Rest, 0.95));
+        let input = base_input(needs_with(NeedKind::Rest, 1.0));
 
         assert!(input.context.foreground_app.is_none());
         assert_eq!(engine.decide(&input).level, InterventionLevel::FullScreen);
     }
 
+    /// 回归测试：心流场景 + 需求拉满 —— 提醒必须发得出去。
+    ///
+    /// 这条测试的前身叫「极高需求在专注场景下也能达到通知级别」，
+    /// 断言的是「至少给个通知」。问题是那个通知在真实环境里看不见，
+    /// 所以「至少」其实等于「没有」。现在断言的是整屏提醒本身。
     #[test]
-    fn 极高需求在专注场景下也能达到通知级别() {
-        // 「场景很敏感」不等于「永不提醒」。需求拉满时至少要给个轻提示，
-        // 否则这个工具在用户最需要它的时候反而是哑的。
+    fn 专注场景下需求到位就发整屏提醒() {
         let engine = PolicyEngine::new();
-        let mut input = base_input(needs_with(NeedKind::Rest, 0.97));
+        let mut input = base_input(needs_with(NeedKind::Rest, 1.0));
         input.context.foreground_app = Some(ForegroundApp::new(
             "com.microsoft.VSCode",
             "Visual Studio Code",
             AppCategory::Editor,
         ));
 
-        assert_eq!(engine.decide(&input).level, InterventionLevel::Notification);
+        assert_eq!(engine.decide(&input).level, InterventionLevel::FullScreen);
     }
 }

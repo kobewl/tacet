@@ -21,6 +21,7 @@ import type {
   AppSnapshot,
   Decision,
   IntentRecord,
+  NeedKind,
   TodaySummary,
   UpdateInfo,
   UserPreferences,
@@ -165,8 +166,15 @@ export const pauseTracking = () => invoke<AppSnapshot>("pause_tracking");
 /** 恢复计时。 */
 export const resumeTracking = () => invoke<AppSnapshot>("resume_tracking");
 
-/** 手动触发一次全屏休息提醒（用于体验，不属于自动提醒路径）。 */
-export const previewReminder = () => invoke<Decision>("preview_reminder");
+/**
+ * 手动触发一次整屏提醒（用于体验，不写库、不影响统计）。
+ *
+ * 可以指定预览哪一类需求 —— 四类在这一屏上的文案和主按钮都不同
+ * （休息是「现在休息」，喝水是「喝了」），只验证休息的话，
+ * 另外三类就等于没人看过。
+ */
+export const previewReminder = (kind?: NeedKind) =>
+  invoke<Decision>("preview_reminder", { kind: kind ?? null });
 
 /** 读取当前平台能力状态。 */
 export const getCapabilities = () => invoke<AppSnapshot["capabilities"]>("get_capabilities");

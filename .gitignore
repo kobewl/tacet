@@ -89,3 +89,9 @@ apps/desktop/.tauri/
 .idea/
 .vscode/settings.json
 *.code-workspace
+
+# AI 工具的本地工作目录（会话计划、工作流草稿等）
+#
+# 这些是开发过程中的临时产物，与项目本身无关，换个人或换台机器
+# 都该重新生成。留着会让仓库里混进一堆只有当时那个人看得懂的笔记。
+.zcode/

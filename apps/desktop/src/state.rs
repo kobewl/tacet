@@ -798,13 +798,30 @@ impl AppState {
     }
 
     /// 用户延后这次提醒。
+    ///
+    /// ## 为什么只有休息类才记 `break.snoozed` 事件
+    ///
+    /// 这个事件喂的是「今天休息了几次、延后了几次」那组统计。
+    /// 早上十点弹出一条「该喝水了」，用户按了「3 分钟后」——
+    /// 那和「休息被延后」是两回事，记进去会让休息的统计虚高。
+    ///
+    /// 判断依据是**这次提醒是为了哪类需求**（`last_decision.kind`），
+    /// 而不是调用方传来的参数：延后这件事语义一致（都是「现在别烦我」），
+    /// 区别只在记不记账。
     pub fn snooze(&mut self, minutes: u32, now: Timestamp) -> Result<(), StateError> {
-        EventRepo::append(
-            &self.db,
-            BehaviorKind::BreakSnoozed,
-            &format!("{{\"minutes\":{minutes}}}"),
-            now,
-        )?;
+        let is_rest = match self.last_decision.as_ref() {
+            Some(decision) => decision.kind == NeedKind::Rest,
+            None => true,
+        };
+
+        if is_rest {
+            EventRepo::append(
+                &self.db,
+                BehaviorKind::BreakSnoozed,
+                &format!("{{\"minutes\":{minutes}}}"),
+                now,
+            )?;
+        }
 
         if let Some(id) = self.last_intervention_id.take() {
             InterventionRepo::resolve(
@@ -1476,13 +1493,13 @@ mod tests {
         }
 
         // ── 第一步：间隔 45 分钟 ──
-        // 需求 = 60 / 45 = 1.33 → 分数封顶 1.0，越过 0.75 的触发线。
+        // 需求 = 60 / 45 = 1.33 → 分数封顶 1.0，越过触发线。
         let mut short = scene(now, hour_ago, 45);
 
         let needs = short.needs(now).expect("算需求");
         assert!(
-            needs.hydration.get() > 0.75,
-            "60 分钟没喝水、间隔 45 分钟，需求分数应当越过触发线，实际 {}",
+            needs.hydration.get() >= 1.0,
+            "60 分钟没喝水、间隔 45 分钟，需求分数应当封顶，实际 {}",
             needs.hydration.get()
         );
 
@@ -1490,15 +1507,16 @@ mod tests {
         //
         // 注意时间要推进到**冷却期之外**：`scene()` 里那次 tick 已经
         // 发出过提醒（并把 `last_interruption_at` 设成了 now），
-        // 而新逻辑下冷却时长 = 45 × 0.6 = 27 分钟。
-        // 所以推进 30 分钟才是一次干净的「该不该再提醒」的检验。
+        // 而冷却时长 = 用户间隔 × 1.0 = 45 分钟（冷却与设定值 1:1，
+        // 见 `tacet_core::policy::cooldown_for` 的说明）。
+        // 所以推进 46 分钟才是一次干净的「该不该再提醒」的检验。
         //
-        // 这条断言本身也顺带验证了「短间隔下 30 分钟后可以再提醒」。
-        let after_cooldown = now.saturating_add_millis(30 * MINUTE);
+        // 这条断言本身也顺带验证了「短间隔下隔一个间隔就能再提醒」。
+        let after_cooldown = now.saturating_add_millis(46 * MINUTE);
         let outcome = short.tick(after_cooldown).expect("tick");
         assert!(
             matches!(outcome, TickOutcome::Intervene(_)),
-            "间隔 45 分钟时，过了 30 分钟冷却期应当可以再次提醒。\
+            "间隔 45 分钟时，过了 46 分钟（冷却一个完整间隔）应当可以再次提醒。\
              实际决策：{:?}，工作状态：{:?}",
             short.last_decision,
             short.work_state()
@@ -1512,7 +1530,7 @@ mod tests {
 
         let needs = long.needs(now).expect("算需求");
         assert!(
-            needs.hydration.get() < 0.75,
+            needs.hydration.get() < 1.0,
             "间隔调成 180 分钟之后需求应当降到触发线以下，实际 {}",
             needs.hydration.get()
         );
@@ -2236,5 +2254,182 @@ mod tests {
         // 之后仍然能取到锁
         let guard = AppState::lock(&state);
         assert_eq!(guard.work_state(), WorkState::Idle);
+    }
+
+    // ======================================================== 端到端：到点提醒
+
+    /// 用一个固定时刻（UTC 下午）造状态 —— 避开「深夜不打扰」的规则，
+    /// 也避开「测试在半夜跑就挂」这个坑。
+    fn afternoon() -> Timestamp {
+        const DAY_MS: i64 = 24 * 60 * MINUTE;
+        Timestamp::from_millis(1_700_000_000_000 / DAY_MS * DAY_MS + 14 * 60 * MINUTE)
+    }
+
+    /// 造一个「用户把休息间隔设成 minutes 分钟、其余三类关掉」的干净状态。
+    ///
+    /// ## 为什么要关掉其余三类
+    ///
+    /// 默认设置里护眼是 40 分钟、休息是 50 分钟 —— 护眼会先到点。
+    /// 这条测试要验证的是「休息的 45 分钟是否精确」，
+    /// 留着其它需求只会让第一次开口被别的类型抢走。
+    /// 关掉它们，测的才是单纯的休息这一条时间线。
+    fn state_with_rest_interval(start: Timestamp, minutes: u32) -> AppState {
+        let mut state = state();
+
+        let mut prefs = state.preferences().expect("读偏好");
+        prefs.reminders.rest = tacet_core::model::ReminderRule::new(true, minutes);
+        prefs.reminders.hydration.enabled = false;
+        prefs.reminders.movement.enabled = false;
+        prefs.reminders.eye_rest.enabled = false;
+        SettingsRepo::save_preferences(&state.db, &prefs).expect("保存偏好");
+
+        // 让状态机进入 Working 并开始计时
+        state.tick(start).expect("首次 tick");
+        state
+    }
+
+    /// 验收测试：**设多少分钟，就在第几分钟提醒**。
+    ///
+    /// ## 这条测试盯住的是用户报的那个问题
+    ///
+    /// > 「我设置的 45 分钟，但是时间到了没有提醒我休息？」
+    ///
+    /// 根因之一是触发线被打了 0.75 的折：设 45 分钟，第 34 分钟就触发了。
+    /// 用户第 45 分钟抬头看时，那次提醒早就过去了（何况它还看不见）。
+    ///
+    /// 所以这里逐分钟 tick，检查**第一次开口恰好落在第 45 分钟**。
+    /// 用真实的 `AppState` 而不是孤立函数，是因为这个问题横跨
+    /// 需求评分 → 时机窗口 → 决策引擎 → 状态机四层，
+    /// 只测任何一层都抓不住它。
+    #[test]
+    fn 设多少分钟就在第几分钟提醒() {
+        use tacet_core::model::BehaviorKind;
+        use tacet_storage::repo::EventRepo;
+
+        let start = afternoon();
+        let mut state = state_with_rest_interval(start, 45);
+
+        // 「距上次休息」需要有一个起点，否则需求一直是「无记录」= 0 分。
+        // 真实的起点是「用户回到电脑前」（`last_return_at`），
+        // 这里用同一件事的另一种记录方式：记一次完成的休息。
+        EventRepo::append(&state.db, BehaviorKind::BreakCompleted, "{}", start).expect("记录休息");
+
+        let mut fired_at: Option<u32> = None;
+
+        for minute in 1..=120u32 {
+            let now = start.saturating_add_millis(minute as i64 * MINUTE);
+            if matches!(state.tick(now).expect("tick"), TickOutcome::Intervene(_)) {
+                fired_at = Some(minute);
+                break;
+            }
+
+            // 顺带确认它没有提前开口
+            let score = state.needs(now).map(|n| n.rest.get()).unwrap_or(0.0);
+            assert!(
+                score < 1.0,
+                "第 {minute} 分钟休息需求就已经封顶了（{score}），\
+                 但触发线是 1.0 —— 它不该在到点前提醒"
+            );
+        }
+
+        assert_eq!(
+            fired_at,
+            Some(45),
+            "设了 45 分钟休息间隔，就必须在第 45 分钟提醒。\
+             实际在第 {fired_at:?} 分钟 —— 这正是用户报的那个问题"
+        );
+    }
+
+    /// 回归测试：用户点「3 分钟后」，3 分钟后必须**真的**再提醒一次。
+    ///
+    /// ## 这个 bug 长什么样
+    ///
+    /// 用户按了「3 分钟后」，然后就没有然后了。
+    ///
+    /// 两层原因叠在一起：`interventions` 表里那条 `snoozed` 记录
+    /// 仍被当成「最近一次打扰」，而冷却期从**它的原始时刻**起算
+    /// （设 45 分钟 → 冷却 45 分钟）。于是延后窗口（3 分钟）
+    /// 整个落在冷却期里面，延后到点时又被冷却拦下。
+    ///
+    /// 现在 `last_disturbing` 排除了被延后的记录，
+    /// 静默期只由 `snooze_until` 一道闸门负责。
+    ///
+    /// ## 为什么要走完整的 tick 链路
+    ///
+    /// 「延后 → 到点 → 重新开口」要同时穿过状态机的 `snooze_until`、
+    /// 仓库层的记录过滤、决策引擎的冷却判断。单独测任何一处
+    /// 都测不出这个 bug —— 它恰恰是三层叠加的产物。
+    #[test]
+    fn 点了几分钟后就真的会在几分钟后再提醒() {
+        use tacet_core::model::BehaviorKind;
+
+        let start = afternoon();
+        let mut state = state_with_rest_interval(start, 45);
+
+        // 记录一次完成的休息，让需求有计时起点
+        EventRepo::append(&state.db, BehaviorKind::BreakCompleted, "{}", start).expect("记录休息");
+
+        // 跑到第一次提醒
+        let mut snoozed_at = None;
+        for minute in 1..=60u32 {
+            let now = start.saturating_add_millis(minute as i64 * MINUTE);
+            if matches!(state.tick(now).expect("tick"), TickOutcome::Intervene(_)) {
+                snoozed_at = Some(now);
+                break;
+            }
+        }
+        let snoozed_at = snoozed_at.expect("第 45 分钟应当有一次提醒");
+
+        // 用户点「3 分钟后」
+        state.snooze(3, snoozed_at).expect("延后");
+
+        // 延后期间必须安静
+        let during = snoozed_at.saturating_add_millis(MINUTE);
+        assert!(
+            matches!(state.tick(during).expect("tick"), TickOutcome::Quiet),
+            "延后期间不该打扰 —— 用户刚说了「等会儿」"
+        );
+
+        // 延后到点：必须重新开口
+        let after = snoozed_at.saturating_add_millis(3 * MINUTE + 10_000);
+        assert!(
+            matches!(state.tick(after).expect("tick"), TickOutcome::Intervene(_)),
+            "用户点了「3 分钟后」，3 分钟后就**必须**再提醒一次。\
+             这是「延后」这个承诺的全部意义 —— 原来它被冷却期拦住了，\
+             用户按完之后就再也等不到提醒"
+        );
+    }
+
+    /// 非休息类的「稍后」不该污染休息统计。
+    ///
+    /// 早上十点弹出「该喝水了」，用户按「3 分钟后」——
+    /// 那不是「休息被延后」。记进去会让今日的休息统计虚高。
+    #[test]
+    fn 非休息类提醒的延后不写进休息统计() {
+        use tacet_core::model::{InterventionLevel, NeedKind, Reason};
+        use tacet_storage::repo::EventRepo;
+
+        let now = afternoon();
+        let mut state = state();
+
+        // 造一个「刚提醒过喝水」的现场
+        state.last_decision = Some(InterventionDecision {
+            kind: NeedKind::Hydration,
+            level: InterventionLevel::FullScreen,
+            reasons: vec![Reason::SinceLastHydration { minutes: 45 }],
+            actions: Vec::new(),
+            fused: Vec::new(),
+        });
+
+        state.snooze(3, now).expect("延后");
+
+        let snoozes = EventRepo::count_in_window(
+            &state.db,
+            BehaviorKind::BreakSnoozed,
+            &tacet_storage::DateWindow::day_of(now, state.offset),
+        )
+        .expect("统计");
+
+        assert_eq!(snoozes, 0, "喝水提醒的「稍后」不该被记成一次「休息被延后」");
     }
 }

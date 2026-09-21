@@ -40,18 +40,79 @@ use std::sync::{Arc, Mutex};
 /// 一台笔记本可能一块，接上扩展坞就变成三块。
 const VEIL_PREFIX: &str = "break-veil-";
 
-/// 显示全屏休息窗口（询问界面，只覆盖一块屏）。
+/// 整屏提醒用的原生毛玻璃。
 ///
-/// ## 为什么这里不盖住所有屏幕
+/// ## 为什么要用系统的，而不是 CSS 的 `backdrop-filter`
 ///
-/// 这个函数在**提醒刚弹出、用户还没做决定**的时候被调用。此刻他要看到的
-/// 是一个问题（「要不要现在休息？」），而不是被强行剥夺所有屏幕的使用权。
-/// 他完全可能点「3 分钟后」然后继续工作 —— 那这时候把副屏糊掉就是纯粹的
-/// 冒犯，而且会让他对这个产品产生敌意。
+/// `backdrop-filter` 只能采样**同一个网页内部**画在它下层的东西。
+/// 提醒窗口是一个独立窗口，它背后是桌面和别的应用 —— 那些像素
+/// 根本不在这个网页的光栅化范围里，采样不到。早期版本试过，
+/// 结果是「一点都不模糊，只剩一层白粉刷在屏幕上」（用户反馈：
+/// 「我的显示器还正常啊，你这弄了个什么啊？」）。
 ///
-/// 所以覆盖其它屏幕的动作放在 `show_break_veils` 里，由用户在
-/// 「现在休息」按钮上按下之后才触发。**先问，再做** —— 这条界线
-/// 是「提醒」和「绑架」的分界，不能含糊。
+/// `NSVisualEffectView` 是 macOS 在**窗口合成层**做的采样与模糊，
+/// 所以它能看到窗口背后的真实内容。`fullScreenUI` 这个材质是
+/// 系统为「整屏覆盖」场景准备的（就是启动台、任务控制挡屏时用的那种），
+/// 和这一屏的用途正好对上。
+///
+/// ## 为什么 `state` 必须是 active
+///
+/// 窗口失去焦点时，系统的默认行为是把材质切成 inactive（变灰、几乎不透明）。
+/// 而这一屏**故意不抢焦点**（幕布窗口用 `focusable(false)` 创建），
+/// 于是它一显示出来就是「未激活」状态 —— 用默认值的话，
+/// 用户看到的会是一层灰板，而不是透出背后内容的模糊。
+fn blur_effects() -> tauri::utils::config::WindowEffectsConfig {
+    tauri::utils::config::WindowEffectsConfig {
+        effects: vec![tauri::utils::WindowEffect::FullScreenUI],
+        state: Some(tauri::utils::WindowEffectState::Active),
+        radius: None,
+        color: None,
+    }
+}
+
+/// 显示整屏休息提醒（询问界面 + 所有屏幕的蒙层）。
+///
+/// ## 为什么连其它屏幕一起蒙（这条改过一次）
+///
+/// 早期版本**只**盖鼠标所在的那块屏，理由写在代码里：
+/// 「提醒刚弹出、用户还没做决定，此刻把副屏糊掉是绑架；先问，再做」。
+///
+/// 那条推理有个漏洞：它假设用户只在一块屏上工作。真实反馈推翻了它 ——
+/// 用户有两块屏，提醒弹出时**另一块屏完全不受影响**，他低头继续在那边干活，
+/// 提醒等于没发生。原话：
+///
+/// > 「这是啥东西啊，而且只有[一块]显示器有」
+///
+/// 「提醒」和「绑架」的分界不在「盖几块屏」，而在**盖住之后能不能立刻退出**：
+///
+/// - 有出口（按钮、Esc、点任意处）→ 是提醒
+/// - 没有出口 → 才是绑架
+///
+/// 现在这套界面三个出口都在，所以盖满所有屏幕是合理的：用户要的是
+/// 「整个画面慢慢模糊，然后问我一句」。
+///
+/// ## 蒙层与主界面是两个窗口
+///
+/// 主界面（`break`）只在一块屏上，因为它带着按钮 —— 四个窗口各有一份
+/// 可点的按钮，用户的点击就会分叉成互相矛盾的操作（详见 `BreakVeil` 的说明）。
+/// 其它屏幕只负责「挡住 + 告诉你还剩多久」，操作集中在一处。
+///
+/// ## 顺序：主界面先显示，蒙层后铺
+///
+/// 这个顺序不能反，反了会让提醒**迟到十秒**。
+///
+/// 主界面窗口是启动时预建的（`tauri.conf.json` 里 `visible: false` 声明），
+/// `show()` 是瞬间的；而蒙层窗口是**用的时候才建**的第一块屏 ——
+/// 新建一个 WebView 要拉起渲染进程、加载并执行整个前端，在慢机器上
+/// 能到十秒量级。
+///
+/// 曾经把蒙层放在前面（理由是「让整个画面一起亮起来」），结果是
+/// 那十秒里用户**什么都看不到**：主窗口还没显示，屏幕上毫无动静，
+/// 而提醒已经在日志里记成「已发出」了。
+///
+/// 现在先让主界面出现（立刻可见、可点），蒙层随后铺上。
+/// 两块屏之间差个几百毫秒完全可以接受 —— 用户先看到问题、
+/// 再看到背景慢慢变糊，这个次序甚至更自然。
 pub fn show_break_window(app: &AppHandle) -> tauri::Result<()> {
     let target = monitor_under_cursor(app);
 
@@ -75,6 +136,11 @@ pub fn show_break_window(app: &AppHandle) -> tauri::Result<()> {
         if reopening {
             announce_break_shown(app);
         }
+
+        // 主界面已经在了 —— 现在再铺蒙层。它慢一点没关系，
+        // 用户至少已经能看到提醒本身（理由见函数文档）。
+        veil_other_screens(app);
+
         return Ok(());
     }
 
@@ -92,6 +158,10 @@ pub fn show_break_window(app: &AppHandle) -> tauri::Result<()> {
     .transparent(true)
     .always_on_top(true)
     .skip_taskbar(true)
+    // 真模糊：交给 macOS 的 NSVisualEffectView 在窗口背后采样。
+    // 这条兜底路径和 tauri.conf.json 里声明的必须一致 ——
+    // 两边不一致的话，配置出问题时建出来的窗口就是「不模糊」的那一个。
+    .effects(blur_effects())
     .build()?;
 
     if let Some(monitor) = &target {
@@ -101,7 +171,24 @@ pub fn show_break_window(app: &AppHandle) -> tauri::Result<()> {
     window.set_focus()?;
     announce_break_shown(app);
 
+    // 兜底路径同样在主界面之后铺蒙层（顺序理由见函数文档）。
+    veil_other_screens(app);
+
     Ok(())
+}
+
+/// 把其它屏幕蒙上，失败只记日志。
+///
+/// 「失败降级」这个处理放在这里而不是各个调用点：蒙层是附加的遮挡层，
+/// 主屏的休息界面已经正常显示了，核心功能没有丢 ——
+/// 因为一个附加层让整个休息流程失败是本末倒置。
+///
+/// 调用它的地方有两处（主界面显示、兜底创建），两处的降级策略一致，
+/// 所以合成一个入口，免得改了一处忘了另一处。
+fn veil_other_screens(app: &AppHandle) {
+    if let Err(err) = show_break_veils(app) {
+        crate::logging::warn(&format!("铺蒙层失败（提醒照常显示）：{err}"));
+    }
 }
 
 /// 告诉休息界面「你被重新打开了，把流程重置到正确的阶段」。
@@ -261,6 +348,34 @@ pub fn show_break_veils(app: &AppHandle) -> tauri::Result<()> {
     let primary = monitor_under_cursor(app);
     let monitors = app.available_monitors()?;
 
+    // ## 为什么这里要打这么详细的日志
+    //
+    // 用户报过「副屏没有被蒙住」，而日志里**一条幕布记录都没有** ——
+    // 查的时候完全看不出它走到哪个分支就返回了。
+    //
+    // 幕布这条链路上每一步都可能静默失败：系统少报一块屏、
+    // 鼠标位置换算偏了、主屏认错……每一种的表现都是「副屏好好的」，
+    // 而原因完全不同。所以把当时的判断依据全记下来 ——
+    // 下次再遇到，一眼就能看到是哪一步。
+    crate::logging::info(&format!(
+        "幕布判断：检测到 {} 块屏 [{}]；鼠标判定在 {:?}",
+        monitors.len(),
+        monitors
+            .iter()
+            .map(|m| {
+                let p = m.position();
+                let s = m.size();
+                format!("({},{}) {}x{}", p.x, p.y, s.width, s.height)
+            })
+            .collect::<Vec<_>>()
+            .join(" / "),
+        primary.as_ref().map(|m| {
+            let p = m.position();
+            let s = m.size();
+            format!("({},{}) {}x{}", p.x, p.y, s.width, s.height)
+        })
+    ));
+
     // 单屏用户（大多数）走这条路：什么都不用做。
     if monitors.len() < 2 {
         return Ok(());
@@ -271,17 +386,12 @@ pub fn show_break_veils(app: &AppHandle) -> tauri::Result<()> {
     // 真正的决定交给下面那个纯函数：`tauri::Monitor` 没法在单测里构造，
     // 但「哪块屏该盖、哪块该跳过」恰恰是这个功能里最容易写错的部分，
     // 必须能测。
-    let screens: Vec<ScreenBox> = monitors.iter().map(ScreenBox::from).collect();
-    let targets = veil_targets(&screens, primary.as_ref().map(ScreenBox::from));
-
-    let mut wanted: Vec<(String, tauri::Monitor)> = Vec::new();
-    for index in targets {
-        let label = format!("{VEIL_PREFIX}{}", wanted.len());
-        wanted.push((label, monitors[index].clone()));
-    }
+    let wanted = wanted_veils(&monitors, primary.as_ref());
 
     if wanted.is_empty() {
-        // 单屏，或主屏是唯一那块。这是个正常的常见情况，不用记日志。
+        // 多块屏却说没有一块要盖 —— 只能是因为几块屏的「位置+尺寸」
+        // 完全一样（认成了同一块）。这种事不该发生，记一笔。
+        crate::logging::warn("幕布：有多块屏，但没有一块需要遮挡（屏幕被认成同一块了？）");
         return Ok(());
     }
 
@@ -302,47 +412,141 @@ pub fn show_break_veils(app: &AppHandle) -> tauri::Result<()> {
     }
 
     for (label, monitor) in &wanted {
-        let window = match app.get_webview_window(label) {
-            // 复用上次留下的窗口：页面已经加载好了，显示出来是瞬间的。
-            // 重新创建会在屏幕上闪一下白，那种「闪」在一个刻意安静的
-            // 界面上非常刺眼。
-            Some(window) => window,
-            None => WebviewWindowBuilder::new(
-                app,
-                label,
-                WebviewUrl::App("index.html?view=veil".into()),
-            )
-            .title("Tacet")
-            .decorations(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .resizable(false)
-            .shadow(false)
-            // ── 焦点：幕布永远不抢键盘焦点 ──
-            //
-            // 这一条不是「更优雅」，是「必须」。
-            //
-            // macOS 上显示一个窗口（`set_visible(true)`）走的是
-            // `makeKeyAndOrderFront` —— 它会把窗口设为 key window，
-            // 也就是**抢走键盘焦点**。而幕布是在用户点完「现在休息」、
-            // 正要填写「接下来准备做什么」的那一刻创建的：
-            // 焦点被抢走，输入框就废了，用户打不了字也不知道为什么。
-            //
-            // `focusable(false)` 让这个窗口永远不会成为 key window，
-            // 从根上避免这件事。用户想用幕布上的出口（点击 / Esc）
-            // 也不需要焦点 —— 点击会先激活窗口，而 Esc 走的是
-            // 主窗口那条路。
-            .focusable(false)
-            .focused(false)
-            .visible(false)
-            .build()?,
-        };
-
+        let window = veil_window(app, label)?;
         fit_to_monitor(&window, monitor);
         window.show()?;
     }
 
     Ok(())
+}
+
+/// 预建副屏蒙层窗口（建好即隐藏，等着被显示）。
+///
+/// ## 为什么需要「预建」这件事
+///
+/// 蒙层窗口带着一整个 WebView，**首次创建**要拉起渲染进程、加载并执行
+/// 前端 —— 实测能到十几秒。
+///
+/// 等到提醒弹出时才建的话，首次提醒的副屏会晚十几秒才蒙住，
+/// 而用户可能早就低头在那边干上活了。更麻烦的是这个延迟**只出现在
+/// 第一次提醒**上（之后复用已建好的窗口，是瞬间的）——
+/// 一个「第一次慢、后面正常」的问题最难复现，也最容易被当成偶发故障。
+///
+/// 所以放在应用启动时建：此时用户本来就在等启动，代价可以接受，
+/// 换来的是每一次提醒都及时。
+///
+/// ## 为什么建好之后立刻隐藏
+///
+/// 窗口声明成 `visible: false`，但 `build()` 之后仍要显式 hide ——
+/// 不同平台上 `visible` 的语义有差异（有的平台是「不激活」而不是
+/// 「不显示」），显式 hide 一次能保证它在启动瞬间绝不出现在屏幕上。
+pub fn prepare_break_veils(app: &AppHandle) -> tauri::Result<()> {
+    let monitors = app.available_monitors()?;
+    if monitors.len() < 2 {
+        // 单屏用户：根本没有副屏要盖，不用建任何窗口。
+        return Ok(());
+    }
+
+    // 用和显示那条路**完全同一份**清单（见 `wanted_veils` 的说明）——
+    // label 对不上就等于白建。
+    let primary = monitor_under_cursor(app);
+    let wanted = wanted_veils(&monitors, primary.as_ref());
+
+    for (label, monitor) in &wanted {
+        let window = veil_window(app, label)?;
+        fit_to_monitor(&window, monitor);
+        // 建完立刻藏起来 —— 它此刻没有任何理由出现在屏幕上。
+        let _ = window.hide();
+    }
+
+    crate::logging::info(&format!(
+        "预建副屏幕布：{} 块（共检测到 {} 块屏）",
+        wanted.len(),
+        monitors.len()
+    ));
+
+    Ok(())
+}
+
+/// 算出这次需要哪几块幕布：`(label, 对应的屏幕)`。
+///
+/// ## 为什么抽成共用函数
+///
+/// 有两条路径需要这份清单 —— 启动时预建（`prepare_break_veils`）
+/// 和提醒弹出时显示（`show_break_veils`）。两边的 **label 必须完全一致**，
+/// 否则预建出来的窗口没人用（显示那条路会另建一个新的，白等十几秒），
+/// 而预建的那个永远挂着白占内存。
+///
+/// 曾经两边不一致：预建用「屏幕在列表里的下标」编号，显示用
+/// 「第几个需要盖的屏」编号 —— 三块屏、主屏在中间时，
+/// 一个建出 `veil-0` + `veil-2`，另一个要的是 `veil-0` + `veil-1`，
+/// 正好错开。所以这份计算只能有一处。
+///
+/// 编号用**需要盖的位置序号**（0、1、2…）而不是屏幕下标：
+/// 前者永远连续、没有空洞，也不受「哪块屏是主屏」的变化影响。
+fn wanted_veils(
+    monitors: &[tauri::Monitor],
+    primary: Option<&tauri::Monitor>,
+) -> Vec<(String, tauri::Monitor)> {
+    let screens: Vec<ScreenBox> = monitors.iter().map(ScreenBox::from).collect();
+
+    veil_labels(&screens, primary.map(ScreenBox::from))
+        .into_iter()
+        .map(|(label, index)| (label, monitors[index].clone()))
+        .collect()
+}
+
+/// 幕布的编号 —— 纯函数，可以单测。
+///
+/// 返回 `(label, 屏幕下标)`。编号用「第几个需要盖的屏」（0、1、2…），
+/// 不用屏幕下标：前者连续无空洞，也不受「哪块是主屏」变化的影响。
+fn veil_labels(screens: &[ScreenBox], primary: Option<ScreenBox>) -> Vec<(String, usize)> {
+    veil_targets(screens, primary)
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, index)| (format!("{VEIL_PREFIX}{ordinal}"), index))
+        .collect()
+}
+
+/// 取（必要时创建）一块副屏的幕布窗口。
+///
+/// 创建参数集中在这里，理由和 `blur_effects` 一样：这套窗口属性
+/// （无边框、置顶、不抢焦点、真模糊）是**必须一致**的一组约定，
+/// 分散在两处（预建、显示）迟早会漂移。
+fn veil_window(app: &AppHandle, label: &str) -> tauri::Result<tauri::WebviewWindow> {
+    if let Some(window) = app.get_webview_window(label) {
+        // 复用上次留下的窗口：页面已经加载好了，显示出来是瞬间的。
+        // 重新创建会在屏幕上闪一下白，那种「闪」在一个刻意安静的
+        // 界面上非常刺眼。
+        return Ok(window);
+    }
+
+    WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html?view=veil".into()))
+        .title("Tacet")
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        // ── 焦点：幕布永远不抢键盘焦点 ──
+        //
+        // 这一条不是「更优雅」，是「必须」。
+        //
+        // macOS 上显示一个窗口（`set_visible(true)`）走的是
+        // `makeKeyAndOrderFront` —— 它会把窗口设为 key window，
+        // 也就是**抢走键盘焦点**。而幕布可能出现在用户正要输入的
+        // 那一刻：焦点被抢走，输入框就废了，用户打不了字也不知道为什么。
+        //
+        // `focusable(false)` 让这个窗口永远不会成为 key window，
+        // 从根上避免这件事。用户想用幕布上的出口（点击）也不需要焦点 ——
+        // 点击会先激活窗口，而 Esc 走的是主窗口那条路。
+        .focusable(false)
+        .focused(false)
+        .visible(false)
+        // 和主界面同一套真模糊 —— 副屏看起来必须和主屏是一件事，
+        // 否则用户会以为自己开了两个不同的东西。
+        .effects(blur_effects())
+        .build()
 }
 
 /// 一块屏的标识 —— 只有「位置 + 尺寸」。
@@ -903,6 +1107,55 @@ mod tests {
         let targets = veil_targets(&screens, None);
 
         assert_eq!(targets, vec![0, 1], "认不出主屏时要全盖");
+    }
+
+    /// 回归测试：幕布的编号必须**连续**，且与屏幕下标解耦。
+    ///
+    /// ## 这个 bug 长什么样
+    ///
+    /// 幕布窗口的 label 在两条路径上被算出来：启动时预建、提醒时显示。
+    /// 曾经两边用了不同的编号口径 —— 一边用「屏幕下标」，一边用
+    /// 「第几个要盖的屏」。三块屏、主屏在中间时：
+    ///
+    /// ```text
+    ///   预建：下标 0 和 2        → veil-0, veil-2
+    ///   显示：序号 0 和 1        → veil-0, veil-1
+    /// ```
+    ///
+    /// 于是 `veil-1` 永远不存在（每次都现建，副屏晚十几秒才蒙住），
+    /// 而 `veil-2` 建出来没人用（白占一份 WebView 的内存）。
+    /// 这类问题在单屏和双屏机器上**完全看不到**，只有三块屏才暴露。
+    #[test]
+    fn 幕布编号连续且与屏幕下标无关() {
+        // 笔记本在中间，左右各一块外接屏
+        let screens = [
+            screen(-2560, 0, 2560, 1440),
+            builtin(),
+            screen(1440, 0, 2560, 1440),
+        ];
+
+        let labels = veil_labels(&screens, Some(builtin()));
+
+        assert_eq!(
+            labels.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(),
+            vec!["break-veil-0", "break-veil-1"],
+            "编号必须是连续的 0、1 —— 中间不能跳过 1 直接到 2"
+        );
+        assert_eq!(
+            labels.iter().map(|(_, i)| *i).collect::<Vec<_>>(),
+            vec![0, 2],
+            "编号映射回屏幕下标时，要指到真正该盖的那两块"
+        );
+    }
+
+    /// 单屏时不该产出任何幕布 —— 预建那条路也走这个判断。
+    #[test]
+    fn 单屏时没有幕布() {
+        let screens = [builtin()];
+        assert!(
+            veil_labels(&screens, Some(builtin())).is_empty(),
+            "只有一块屏时不存在「副屏」，不该建任何幕布窗口"
+        );
     }
 
     #[test]

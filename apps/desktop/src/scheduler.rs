@@ -83,18 +83,37 @@ fn tick_once(app: &AppHandle, state: &Arc<Mutex<AppState>>) {
         TickOutcome::Quiet => {}
 
         TickOutcome::Intervene(decision) => {
-            // Level 4（全屏）：开 Overlay 窗口
-            if decision.level == InterventionLevel::FullScreen {
-                if let Err(err) = windows::show_break_window(app) {
-                    crate::logging::error(&format!("打不开全屏提醒窗口：{err}"));
+            // 整屏提醒是 v0.1.2 里唯一的打扰形态（四类需求都一样）。
+            //
+            // ## 为什么不再按等级分两条路
+            //
+            // 早期版本在这里分了岔：Level 4 开全屏窗口，其它等级发系统通知。
+            // 但那条通知路径在真实环境里是**断的** —— 应用从未向 macOS
+            // 申请过通知授权（桌面端插件的 permission API 恒返回 Granted，
+            // 是个空操作），所以通知只进通知中心、不弹横幅。
+            // 用户的实际体验是「设了 45 分钟，到点什么都没发生」。
+            //
+            // 决策层现在已经只产出 FullScreen（见 `PolicyEngine::choose_level`），
+            // 所以这个 match 的其它分支是**防御性**的：万一将来新增了等级，
+            // 也不会静默地什么都不做。
+            match decision.level {
+                InterventionLevel::FullScreen => {
+                    if let Err(err) = windows::show_break_window(app) {
+                        crate::logging::error(&format!("打不开整屏提醒窗口：{err}"));
+                    }
                 }
-            } else {
-                // Level 2（通知）：发系统通知
-                //
-                // Level 3（浮卡）属于 v0.2，v0.1 不会产生这个等级。
-                let (title, body) = crate::state::notification_text(&decision);
-                if let Err(err) = windows::send_notification(app, &title, &body) {
-                    crate::logging::warn(&format!("发通知失败：{err}"));
+
+                // 兜底：理论上到不了这里。真到了就发系统通知 ——
+                // 它虽然弹不出横幅，但至少在通知中心留得下一条记录，
+                // 比完全静默要好。
+                other => {
+                    crate::logging::warn(&format!(
+                        "出现了非整屏的打扰等级 {other:?}，改用系统通知兜底"
+                    ));
+                    let (title, body) = crate::state::notification_text(&decision);
+                    if let Err(err) = windows::send_notification(app, &title, &body) {
+                        crate::logging::warn(&format!("发通知失败：{err}"));
+                    }
                 }
             }
         }
