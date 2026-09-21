@@ -180,6 +180,25 @@ pnpm --filter @tacet/ui dev
 cd apps/desktop && pnpm exec tauri build --bundles app
 ```
 
+> **本地构建会要求更新私钥。** `tauri.conf.json` 里开了 `bundle.createUpdaterArtifacts`
+>（自动更新需要），所以构建时会去找 `TAURI_SIGNING_PRIVATE_KEY`；
+> 没有它就**直接失败**，报「A public key has been found, but no private key」。
+>
+> 日常开发不需要产更新包，用这条命令关掉它即可：
+>
+> ```bash
+> pnpm exec tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+> ```
+>
+> 要验证完整的更新产物（`.sig` + `latest.json`），才需要带上私钥：
+>
+> ```bash
+> TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/tacet-updater.key)" \
+>   pnpm exec tauri build --bundles app
+> ```
+>
+> 发版流程见 [`docs/release/自动更新.md`](docs/release/自动更新.md)。
+
 #### 怎么正确地打开应用（这一条很容易踩坑）
 
 构建产物在 `target/release/bundle/macos/Tacet.app`。**请双击这个 `.app` 打开**，

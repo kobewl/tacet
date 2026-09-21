@@ -26,6 +26,7 @@ pub mod commands;
 pub mod logging;
 pub mod scheduler;
 pub mod state;
+pub mod update;
 pub mod windows;
 
 pub use state::AppState;

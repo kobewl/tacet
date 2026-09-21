@@ -22,6 +22,7 @@ import type {
   Decision,
   IntentRecord,
   TodaySummary,
+  UpdateInfo,
   UserPreferences,
 } from "./types";
 
@@ -147,11 +148,62 @@ export const closeCurrentWindow = () => invoke<void>("close_current_window");
  */
 export const dismissBreak = () => invoke<void>("dismiss_break");
 
+/**
+ * 读取当前应用版本。
+ *
+ * 走 Tauri 的 `getVersion()`（读的是打包进二进制的版本号），而不是前端
+ * 自己写一个常量。这一条对「更新」这件事是必须的：如果版本号是写死的，
+ * 更新完之后界面还会显示旧版本，用户会以为更新失败了。
+ *
+ * 浏览器预览下没有这个 API，返回一个显眼的占位值 —— 让开发时一眼看出
+ * 「这是假数据」，而不是误以为版本号真的叫这个名字。
+ */
+export async function getAppVersion(): Promise<string> {
+  if (!isTauri()) return "0.1.0（浏览器预览）";
+
+  const { getVersion } = await import("@tauri-apps/api/app");
+  return getVersion();
+}
+
 /** 把主面板窗口调整到内容需要的高度。 */
 export const resizePanel = (height: number) => invoke<void>("resize_panel", { height });
 
-/** 打开发布说明页（关于页用）。 */
-export const openAboutPage = () => invoke<void>("open_about_page");
+// ============================================================ 应用更新
+
+/**
+ * 检查有没有新版本。
+ *
+ * 返回 `null` 表示**已经是最新**（一个正常结果，不是错误）；
+ * 抛错表示检查本身失败了（网络不通、发布渠道没就绪）。
+ *
+ * ## 为什么不用「自动检查更新」
+ *
+ * 菜单栏应用在后台偷偷联网，是一件需要向用户解释的事。Tacet 的原则是
+ * 「不配置任何东西时它也该完全安静地工作」（原则 7），所以 v0.1 里更新是
+ * **用户主动触发**的：点了才查。将来要做后台检查时，也应该是一个默认关闭的
+ * 开关，而不是默认打开的行为。
+ */
+export const checkUpdate = () => invoke<UpdateInfo | null>("check_update");
+
+/**
+ * 下载并安装更新。成功后应用会重启 —— 也就是说**这个 Promise 可能不会返回**。
+ *
+ * 调用方不该依赖它之后继续执行；进度通过 `update:progress` 事件推过来。
+ */
+export const installUpdate = () => invoke<void>("install_update");
+
+/** 监听更新包下载进度（0~100）。返回取消监听的函数。 */
+export const onUpdateProgress = (handler: (percent: number) => void) =>
+  listen<number>("update:progress", handler);
+
+/**
+ * 用系统浏览器打开发布页 —— 自动更新不可用时的兜底路径。
+ *
+ * 后端只放行本项目 Release 页下的地址（见 Rust 侧 `open_release_page`），
+ * 这里传别的 URL 会被拒绝。
+ */
+export const openReleasePage = (url: string) =>
+  invoke<void>("open_release_page", { url });
 
 // ============================================================ 开发用假数据
 //
@@ -451,12 +503,29 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     //
     // `dismiss_break`：幕布上的动作。浏览器预览里没有副屏也没有幕布窗口，
     // 收到这个调用说明有人手动触发了 —— 忽略即可。
-    case "open_about_page":
     case "open_settings_window":
     case "close_current_window":
     case "resize_panel":
     case "dismiss_break":
       return undefined as unknown as T;
+
+    // 浏览器预览里打开 Release 页：直接开新标签页，正是用户期待的
+    case "open_release_page": {
+      const url = argString(args, "url");
+      if (url) window.open(url, "_blank", "noopener");
+      return undefined as unknown as T;
+    }
+
+    // ── 应用更新 ──
+    //
+    // 浏览器预览里没有更新器（`isTauri()` 为 false 时走的正是这里），
+    // 所以只能给一个**明确的**答复，而不是假装成功：
+    // 假装成功会让开发时以为「检查更新」这条路径通了，实际上从没连通。
+    case "check_update":
+      throw new Error("浏览器预览模式下没有更新器，请在打包后的应用里检查更新");
+
+    case "install_update":
+      throw new Error("浏览器预览模式下没有更新器，无法安装更新");
 
     default:
       throw new Error(`未实现的假命令：${command}`);

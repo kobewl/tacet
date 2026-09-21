@@ -65,7 +65,7 @@ impl From<tauri::Error> for CommandError {
     }
 }
 
-type CmdResult<T> = Result<T, CommandError>;
+pub type CmdResult<T> = Result<T, CommandError>;
 
 /// 取当前完整状态快照。
 #[tauri::command]

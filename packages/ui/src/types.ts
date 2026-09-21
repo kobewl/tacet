@@ -152,6 +152,25 @@ export interface CapabilityInfo {
   reason: string | null;
 }
 
+/**
+ * 一次「检查更新」的结果。对应 Rust 侧 `update::UpdateInfo`。
+ *
+ * 只有**发现新版本**时后端才会返回这个对象；已经是最新时返回 `null`。
+ * 这不是为了省字段，而是因为「没有更新」和「检查失败」在界面上
+ * 是完全不同的两件事：前者该显示「已是最新」，后者该显示错误原因。
+ * 用一个 `hasUpdate: boolean` 把它们揉在一起，就分不出来了。
+ */
+export interface UpdateInfo {
+  /** 当前运行的版本。 */
+  currentVersion: string;
+  /** 远端最新版本。 */
+  version: string;
+  /** 发布说明；没有时为空字符串。 */
+  notes: string;
+  /** 发布页地址，供手动下载。 */
+  releaseUrl: string;
+}
+
 /** 后台线程推送给 UI 的事件载荷。 */
 export type TacetEvent =
   | { type: "snapshot"; snapshot: AppSnapshot }

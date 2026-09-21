@@ -31,6 +31,14 @@ tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-ap
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+# 应用内自动更新。更新包由 minisign 私钥签名（发布时通过
+# TAURI_SIGNING_PRIVATE_KEY 提供），本插件用 tauri.conf.json 里的公钥验签，
+# 验不过直接拒装 —— 下载链路被替换的包进不来。
+# 与 Apple 代码签名无关：未签名的个人测试包也能用这一套。
+tauri-plugin-updater = "2"
+# 用系统默认浏览器打开外部链接（更新失败时的手动下载兜底）。
+# 只在 Rust 侧调用，前端没有开这个权限。
+tauri-plugin-opener = "2"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

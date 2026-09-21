@@ -209,6 +209,86 @@
   flex: 0 0 auto;
 }
 
+/* ============================================================ 软件更新 */
+
+/**
+ * 更新块：一行「软件更新 + 按钮」，下面按需展开发布说明。
+ *
+ * 它跟着 `.setting-row` 走（复用行内间距与分隔线），但外面多包一层，
+ * 因为发布说明要从「行」里溢出来 —— 那一块属于整个卡片而不是某一行。
+ */
+.update-row {
+  border-top: 1px solid var(--border-soft);
+}
+
+/**
+ * 检查中的转圈。
+ *
+ * 用 CSS 动画而不是文字省略号：这个状态可能持续几秒（要走一次网络请求），
+ * 一个会动的指示器才让人确信「它还在干活」。
+ *
+ * `prefers-reduced-motion` 下动画会被停掉 —— 对前庭敏感的用户，
+ * 旋转的图形是真实的不适来源，而这里少一个转圈不影响任何功能。
+ */
+.update-spinner {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: update-spin 0.7s linear infinite;
+}
+
+@keyframes update-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-spinner {
+    animation: none;
+    border-top-color: var(--border-strong);
+  }
+}
+
+.update-notes {
+  padding: 0 15px 13px;
+}
+
+/**
+ * 发布说明的正文。
+ *
+ * `white-space: pre-wrap` 保留 Release body 里的换行与列表排版
+ *（GitHub 的 Markdown 源文本），又不解析任何标记。用 `pre` 标签 +
+ * 自动换行，能让说明按原样显示且不会横向溢出。
+ */
+.update-notes-body {
+  margin: 0;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.update-notes-link {
+  margin-top: 6px;
+  padding: 0;
+  height: auto;
+}
+
+/* 出错时的兜底动作（「前往下载页」） */
+.update-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 15px 11px;
+}
+
 /* ============================================================ 说明与底部 */
 
 .settings-note {

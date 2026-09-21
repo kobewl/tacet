@@ -37,6 +37,7 @@ use tacet_desktop_lib::commands;
 use tacet_desktop_lib::logging;
 use tacet_desktop_lib::scheduler;
 use tacet_desktop_lib::state::{self as app_state, AppState};
+use tacet_desktop_lib::update;
 use tacet_desktop_lib::windows;
 
 fn main() {
@@ -57,6 +58,14 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // 更新器：端点与公钥都在 tauri.conf.json 的 plugins.updater 里，
+        // 这里不需要额外配置 —— 只有需要覆盖端点时才用 Builder。
+        // 私钥不在这里：它只在发布构建时通过 TAURI_SIGNING_PRIVATE_KEY 出现。
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // 只用 Rust 侧调用来打开外部链接（更新失败时的手动下载兜底）。
+        // capability 里**不给前端** opener 权限 —— 前端能开的每一个网址，
+        // 都是一个需要单独审计的出口，这里只需要一个。
+        .plugin(tauri_plugin_opener::init())
         // ------------------------------------------------ 初始化
         .setup(|app| {
             logging::info(&format!("启动 Tacet {}", env!("CARGO_PKG_VERSION")));
@@ -135,6 +144,10 @@ fn main() {
             commands::open_today_window,
             commands::close_current_window,
             commands::resize_panel,
+            // 应用内更新（见 update 模块：检查与安装分开，各自可失败）
+            update::check_update,
+            update::install_update,
+            update::open_release_page,
         ])
         // ------------------------------------------------ 窗口事件
         .on_window_event(|window, event| {

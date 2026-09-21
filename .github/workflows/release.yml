@@ -1,0 +1,283 @@
+name: Release
+
+# 什么时候发版？
+#
+# 只认语义化版本的标签（v0.1.0）。**不**在推 main 时自动发 ——
+# 发版要是一个有意识动作，而不是「顺手推了一下」的副作用。
+#
+# ## 为什么用 workflow_dispatch 也能跑
+#
+# 补发场景：某次发布因为 workflow 配置有问题而失败了。这时**不要移动已发布的
+# tag**（那样会让已经下载过旧包的客户端状态变得无法解释），而是修好配置、
+# 用同一个 tag 重新构建。输入框里填已存在的 tag 即可。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已存在的 release 标签（用于补发）
+        required: true
+        type: string
+
+# 发 Release 需要写权限（创建 release、上传附件）
+permissions:
+  contents: write
+
+# 同一次发布不要并发跑两份：两个任务同时上传附件会互相覆盖，
+# 而且第二个会因为「release 已存在」而报出难以理解的错误。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: 构建并发布
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 手动补发时从指定 tag 构建，确保产物版本与 Release 完全一致。
+          # 不写这个的话，补发会从触发时的默认分支构建 ——
+          # 那就可能构建出「版本号对不上 tag」的包。
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # ── 版本号必须与 tag 一致 ──
+      #
+      # 这是发布流程里**唯一**一条「错了就发不出去」的检查，也是最容易犯的错：
+      # 改完代码忘了升版本号，或者打了 v0.2.0 的标签但配置里还写着 0.1.0。
+      #
+      # 后果不是「显示了个旧数字」那么轻：
+      #   - 客户端读 latest.json 里的 version，发现不比当前版本高，就**不认为有更新**；
+      #   - 于是这个版本永远推不下去，用户收不到，而 Release 页面上它明明白白地挂着。
+      # 这种「发布了但没人能更新」的状态，排查起来要绕一大圈。
+      #
+      # 顺带也核了一遍研发规范 §3.3 红线 3 的「版本号单一真值」——
+      # 这三处必须同时改，漏掉任何一处都会在这里失败。
+      - name: 检查版本号与 tag 一致
+        run: |
+          set -euo pipefail
+
+          TAG="${{ inputs.tag || github.ref_name }}"
+          # 允许标签写成 v0.1.0 或 0.1.0 两种形式，比较时统一去掉前缀
+          TAG_VERSION="${TAG#v}"
+
+          CARGO_V=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          CONF_V=$(python3 -c "import json;print(json.load(open('apps/desktop/tauri.conf.json'))['version'])")
+          UI_V=$(python3 -c "import json;print(json.load(open('packages/ui/package.json'))['version'])")
+
+          echo "tag:                 $TAG_VERSION"
+          echo "Cargo.toml:          $CARGO_V"
+          echo "tauri.conf.json:     $CONF_V"
+          echo "packages/ui:         $UI_V"
+
+          if [ "$CARGO_V" != "$CONF_V" ] || [ "$CARGO_V" != "$UI_V" ]; then
+            echo "❌ 三处版本号不一致（研发规范 §3.3 红线 3）"
+            exit 1
+          fi
+
+          if [ "$CARGO_V" != "$TAG_VERSION" ]; then
+            echo "❌ tag ($TAG_VERSION) 与应用版本号 ($CARGO_V) 不一致"
+            echo "   请把三处版本号改成 $TAG_VERSION 后再发版；"
+            echo "   或者删掉这个 tag 重新打（尚未发布时才可以这样做）。"
+            exit 1
+          fi
+
+          echo "✅ 版本号一致"
+
+      # ── 私钥与配置里的公钥必须是同一对 ──
+      #
+      # 这是更新链路里**最难在事后发现**的一种错：私钥配错了（比如把别的项目
+      # 的密钥填进来了），构建完全正常、Release 也发得出去、附件齐全 ——
+      # 只有在用户点「立即更新」时才会失败，报「签名不匹配」，
+      # 而此时已经没法悄悄修了（客户端只认最初发布的那把公钥）。
+      #
+      # 所以在这里先自证一次：用私钥推导出公钥，跟 tauri.conf.json 里那把比。
+      # 比对的是公钥，不是私钥 —— 公钥本来就是公开的，打印出来没有风险。
+      #
+      # ## 为什么不在构建前检查，而是放到构建后
+      #
+      # 因为这样能**直接验证真产物**，而不是验证一个推论：
+      #
+      # 私钥文件是加密的（`rsign encrypted secret key`），没法直接切出公钥来比；
+      # 硬要解得先实现 minisign 的 KDF。而且「从私钥推出公钥」即使做对了，
+      # 也只证明「私钥配的公钥是 X」，不证明「构建器实际用这个私钥签了名、
+      # 签出来的正是我配置的那把」。
+      #
+      # 换个更直接的思路：**签名本身和公钥里都带着同一个 key_id**
+      #（minisign 用它在验签时快速排除不匹配的密钥）。比对这个 ID，
+      # 就是拿真实产物做的证明 —— 签名确实是配置里那把公钥对应的私钥签的。
+      #
+      # 这一步放在构建之后，所以它顺带也兜住了「构建器压根没签名」的情况。
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      # 必须在 cargo 编译之前：`tauri::generate_context!()` 是编译期宏，
+      # 会读取 frontendDist（../../packages/ui/dist）并嵌进二进制，
+      # 那个目录不存在时直接 panic。理由详见 ci.yml 里同一段说明。
+      - name: 构建前端产物
+        run: pnpm --filter @tacet/ui build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          # 通用包（同时支持 Apple 芯片与 Intel）需要两个目标都装上。
+          # 只装默认目标的话，构建会在链接 x86_64 时失败。
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: 缓存 Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # ── 发版前的最后一道闸门 ──
+      #
+      # 「发布」比「合并」更难撤回：用户装上之后，更新器**只能往前走**，
+      # 没法用一次更新把他退回旧版本。所以这里宁可多花几分钟。
+      - name: 测试
+        run: cargo test --workspace
+
+      # ── 构建并发布 ──
+      #
+      # `--target universal-apple-darwin` 产出一个通用包：同一份 .app 既能跑在
+      # Apple 芯片也能跑在 Intel 上。用它的理由不是「显得专业」，而是
+      # **latest.json 不需要分支**：一个包同时满足 darwin-aarch64 和
+      # darwin-x86_64 两个平台键，不会出现「Intel 用户点更新说没有适用版本」。
+      #
+      # 从这里开始，Tauri 的更新签名链路登场（与 Apple 代码签名无关）：
+      #   - 构建器用 TAURI_SIGNING_PRIVATE_KEY 给更新包签名，产出 .sig；
+      #   - 同时生成 latest.json（含各平台下载地址与签名）；
+      #   - 客户端下载后用**内置的公钥**验签，验不过直接拒装。
+      #
+      # ## 私钥的传法（这里是实测出来的，不是猜的）
+      #
+      # `TAURI_SIGNING_PRIVATE_KEY` 要的是**密钥文件的内容**，不是路径。
+      # 官方文档里那个 `TAURI_SIGNING_PRIVATE_KEY_PATH` 变量在 2.x 的 CLI 上
+      # 不被识别 —— 只设它的话会报「no private key」，白排查一轮。
+      #
+      # ## 私钥缺失的后果是「构建失败」，不是「跳过签名」
+      #
+      # 实测（本地不带私钥跑 `tauri build`）：
+      #
+      #     A public key has been found, but no private key.
+      #     Make sure to set `TAURI_SIGNING_PRIVATE_KEY` environment variable.
+      #     Error ... EXIT 1
+      #
+      # 这个报错出现在打包**之后**，所以日志里会先看到一串正常的 Bundling
+      # 输出，最后才失败 —— 很容易误判成「打包有问题」。
+      # 看到这句话时，直接去看 Secret 配没配、名字对不对。
+      - name: 构建并发布 Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # 密钥生成时没有设密码，所以这里是空字符串。
+          # 注意：**不能省略这一行** —— 省略后签名工具会去交互式索要密码，
+          # 而 CI 里没有终端，构建会卡住直到超时。
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # 显式关掉 Apple 代码签名：这个项目没有证书，走的是未签名分发。
+          APPLE_SIGNING_IDENTITY: "-"
+        with:
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: Tacet ${{ inputs.tag || github.ref_name }}
+          releaseBody: |
+            > **未签名的个人测试包。** 首次打开若被 macOS 拦住，请在「系统设置 →
+            > 隐私与安全性」中允许；更新后辅助功能等系统权限可能需要重新授权。
+            >
+            > 更新包带有 Tauri 的签名校验：应用会验证下载到的包确实来自本项目的
+            > 发布，验证不通过就不会安装。
+
+            完整的变更说明见仓库的提交记录。
+          releaseDraft: false
+          prerelease: false
+          # 通用包：一份产物同时覆盖 Apple 芯片与 Intel
+          args: --target universal-apple-darwin
+
+      # ── 核对产物 ──
+      #
+      # 这一步是「构建成功」与「更新真的能用」之间的差额。
+      # 构建成功但漏了 .sig / latest.json 的情况很常见（通常是私钥没配），
+      # 而那时 Release 看起来是完整的 —— 只有用户点「检查更新」才会发现问题。
+      # 与其等用户来报，不如在这里直接失败，让发版的人立刻知道。
+      - name: 确认更新产物齐全
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "── Release $TAG 的附件 ──"
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets \
+            --jq '.assets[].name'
+
+          NAMES=$(gh release view "$TAG" --repo "${{ github.repository }}" \
+            --json assets --jq '.assets[].name')
+
+          fail=0
+
+          # 1) 更新包（自动更新下载的就是它）
+          if ! echo "$NAMES" | grep -q '\.app\.tar\.gz$'; then
+            echo "❌ 缺少 .app.tar.gz —— 自动更新的下载包"
+            fail=1
+          fi
+
+          # 2) 更新包签名
+          if ! echo "$NAMES" | grep -q '\.app\.tar\.gz\.sig$'; then
+            echo "❌ 缺少 .sig 签名文件"
+            echo "   最常见原因：TAURI_SIGNING_PRIVATE_KEY Secret 没配置，"
+            echo "   或 tauri.conf.json 里漏了 bundle.createUpdaterArtifacts: true"
+            fail=1
+          fi
+
+          # 3) 更新清单 —— 客户端读的就是它
+          if ! echo "$NAMES" | grep -qx 'latest.json'; then
+            echo "❌ 缺少 latest.json —— 客户端靠它发现新版本"
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo
+            echo "❌ 更新产物不完整。这个 Release 可以被手动下载，但应用内更新用不了。"
+            echo "   修复后请用同一个 tag 重新运行本工作流（不要移动 tag）。"
+            exit 1
+          fi
+
+          # ── 4) 签名与内置公钥必须是同一对 ──
+          #
+          # 前三项只验证「文件在不在」，这一项验证「签名对不对」。
+          #
+          # 它拦住的是最难在事后发现的一种错：Secret 里配了**别的项目**的私钥。
+          # 那种情况下前三项全部通过、Release 看起来完好无损，
+          # 只有当用户点「立即更新」时才会报「签名不匹配」——
+          # 而那时已经无法悄悄补救了：客户端只认最初发布的那把公钥。
+          #
+          # minisign 的签名与公钥里都带有同一个 8 字节 key_id，
+          # 比对它就等于证明「这个签名确实是配置里那把公钥的配对私钥签的」。
+          #
+          # 比对逻辑写在 .github/scripts/compare-signature-key.py 里 ——
+          # 与 plist 检查同样的理由：Python 内联在 YAML 块里时，
+          # 只要有一行顶格写，整个 workflow 会在**解析阶段**就失败，
+          # 表现为「CI 0 秒失败、日志空白」，极难定位。
+          echo
+          echo "── 校验签名与内置公钥是否配对 ──"
+          gh release download "$TAG" --repo "${{ github.repository }}" \
+            --pattern '*.sig' --dir /tmp/updater-sig --clobber
+
+          python3 .github/scripts/compare-signature-key.py \
+            apps/desktop/tauri.conf.json /tmp/updater-sig/*.sig
+
+          echo
+          echo "✅ 更新产物齐全且签名正确"

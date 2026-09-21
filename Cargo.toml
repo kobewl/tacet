@@ -23,7 +23,7 @@ edition = "2021"
 rust-version = "1.80"
 license = "MIT"
 authors = ["liang"]
-repository = "https://github.com/tacet-app/tacet"
+repository = "https://github.com/kobewl/tacet"
 
 # 依赖统一在这里声明版本，各 crate 用 dep.workspace = true 引用。
 # 好处：升级依赖只改一处；避免不同 crate 锁到不兼容的版本。

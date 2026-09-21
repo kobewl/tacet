@@ -20,7 +20,7 @@ import { useEffect, useState } from "react";
 
 import * as api from "../api";
 import { useCommand, useTacet } from "../hooks/useTacet";
-import type { NeedKind, UserPreferences } from "../types";
+import type { NeedKind, UpdateInfo, UserPreferences } from "../types";
 import { NEED_META } from "../types";
 import "./Settings.css";
 
@@ -145,6 +145,197 @@ function ReminderRow({ kind, rule, onChange }: ReminderRowProps) {
   );
 }
 
+/**
+ * 「检查更新」一行。
+ *
+ * ## 为什么更新是用户主动触发的
+ *
+ * 一个常驻菜单栏的健康工具在后台偷偷联网，是一件需要向用户解释的事。
+ * Tacet 的原则是「不配置任何东西时它也该安静地工作」（原则 7），
+ * 所以这里没有自动检查：**点了才查**。
+ *
+ * ## 状态为什么是一个联合而不是几个 boolean
+ *
+ * 「正在查」「已是最新」「有新版本」「检查失败」这四种状态是互斥的，
+ * 用 `loading` / `hasUpdate` / `error` 三个独立变量表达，会出现
+ * 「既在加载又有错误」这种不可能却表示得出来的组合。
+ * 一个字段穷举所有情况，界面就不可能显示出矛盾的状态。
+ */
+type UpdateState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "up-to-date" }
+  | { kind: "available"; info: UpdateInfo }
+  | { kind: "installing"; percent: number | null }
+  | { kind: "error"; message: string };
+
+function UpdateRow() {
+  const [state, setState] = useState<UpdateState>({ kind: "idle" });
+
+  // 订阅下载进度。
+  //
+  // ## 为什么订阅一次就够，不需要「只在安装时订阅」
+  //
+  // 安装成功后应用就重启了，这个窗口根本活不到下一次检查更新。
+  // 所以订阅常驻是安全的，也让这个 effect 不再依赖任何状态 ——
+  // 依赖数组为空，不会因为进度更新而反复订阅（那会让进度条一顿一顿的）。
+  //
+  // 用函数式 setState 读当前状态：只有正在安装时才采纳进度值。
+  // 这样即使有空转的事件进来，也不会把一个「已是最新」的界面
+  // 突然变成「正在下载」。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    void api
+      .onUpdateProgress((percent) => {
+        if (cancelled) return;
+        setState((prev) =>
+          prev.kind === "installing" ? { kind: "installing", percent } : prev,
+        );
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const check = () => {
+    setState({ kind: "checking" });
+    void (async () => {
+      try {
+        const info = await api.checkUpdate();
+        setState(info ? { kind: "available", info } : { kind: "up-to-date" });
+      } catch (err) {
+        setState({
+          kind: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+  };
+
+  const install = () => {
+    setState({ kind: "installing", percent: null });
+    void (async () => {
+      try {
+        await api.installUpdate();
+        // 正常情况下走不到这里：安装成功后应用会重启，这个 Promise 就断了。
+        // 真的返回了说明重启没发生 —— 如实告诉用户，别假装成功。
+        setState({
+          kind: "error",
+          message: "更新已安装，但应用没有自动重启。请手动退出并重新打开 Tacet。",
+        });
+      } catch (err) {
+        setState({
+          kind: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+  };
+
+  /** 兜底：到浏览器里下载。 */
+  const openReleases = (url: string) => {
+    void api.openReleasePage(url);
+  };
+
+  const busy = state.kind === "checking" || state.kind === "installing";
+
+  return (
+    <div className="update-row">
+      <div className="setting-row compact">
+        <div className="setting-row-body wide">
+          <div className="setting-row-name">软件更新</div>
+          <div className="sub">{describeUpdateState(state)}</div>
+        </div>
+
+        {state.kind === "available" ? (
+          <button className="btn btn-primary" onClick={install}>
+            立即更新
+          </button>
+        ) : state.kind === "installing" ? (
+          <span className="update-spinner" aria-hidden />
+        ) : (
+          <button className="btn btn-quiet" onClick={check} disabled={busy}>
+            {state.kind === "checking" ? "检查中…" : "检查更新"}
+          </button>
+        )}
+      </div>
+
+      {/* 有新版本时把发布说明摊开 —— 用户要能看清「这次改了什么」再决定装不装 */}
+      {state.kind === "available" ? (
+        <UpdateNotes info={state.info} onOpenReleases={openReleases} />
+      ) : null}
+
+      {/* 出错时给一条**能自己走下去**的路：不能更新不等于不能用，
+          用户至少应该能手动去下载。 */}
+      {state.kind === "error" ? (
+        <div className="update-actions">
+          <button
+            className="btn btn-ghost"
+            onClick={() => openReleases("https://github.com/kobewl/tacet/releases/latest")}
+          >
+            前往下载页
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** 把状态翻译成一句给用户看的话。 */
+function describeUpdateState(state: UpdateState): string {
+  switch (state.kind) {
+    case "idle":
+      return "检查有没有新版本。只有点这个按钮时才会联网。";
+    case "checking":
+      return "正在查询…";
+    case "up-to-date":
+      return "已经是最新版本";
+    case "available":
+      return `有新版本 ${state.info.version}（当前 ${state.info.currentVersion}）`;
+    case "installing":
+      return state.percent === null
+        ? "正在下载更新…"
+        : `正在下载更新… ${state.percent}%`;
+    case "error":
+      return state.message;
+  }
+}
+
+/** 新版本的发布说明。「前往下载」是装不了时的退路。 */
+function UpdateNotes({
+  info,
+  onOpenReleases,
+}: {
+  info: UpdateInfo;
+  onOpenReleases: (url: string) => void;
+}) {
+  return (
+    <div className="update-notes">
+      {info.notes ? (
+        // 发布说明是纯文本（来自 Release body）：不解析 Markdown，
+        // 也不用 innerHTML —— 那两者都会把外部内容变成可执行的东西。
+        <pre className="update-notes-body">{info.notes}</pre>
+      ) : (
+        <div className="sub">这个版本没有附发布说明。</div>
+      )}
+
+      <button
+        className="btn btn-ghost update-notes-link"
+        onClick={() => onOpenReleases(info.releaseUrl)}
+      >
+        查看发布页
+      </button>
+    </div>
+  );
+}
+
 export function Settings() {
   const { snapshot } = useTacet();
   const { run, busy } = useCommand();
@@ -152,6 +343,8 @@ export function Settings() {
   /** 进来时的原始偏好，用来判断「有没有改过」。 */
   const [baseline, setBaseline] = useState<UserPreferences | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  /** 应用版本，从二进制里读（更新后这里会跟着变）。 */
+  const [appVersion, setAppVersion] = useState("…");
 
   // 首屏读一次偏好
   useEffect(() => {
@@ -161,6 +354,12 @@ export function Settings() {
       setBaseline(loaded);
     })();
     // 只在挂载时读一次：之后的改动都走本地 state + 显式保存
+  }, []);
+
+  // 版本号独立读一次。失败不阻塞设置页 —— 显示占位符即可，
+  // 一个读不到的版本号不该让整页功能不可用。
+  useEffect(() => {
+    void api.getAppVersion().then(setAppVersion).catch(() => setAppVersion("未知"));
   }, []);
 
   if (!prefs) {
@@ -326,11 +525,21 @@ export function Settings() {
               <div className="setting-row-body wide">
                 <div className="setting-row-name">Tacet</div>
                 <div className="sub">
-                  版本 0.1.0 · 数据全部保存在本机，没有账号，没有云端
+                  版本 {appVersion} · 数据全部保存在本机，没有账号，没有云端
                 </div>
               </div>
             </div>
+
+            <UpdateRow />
           </div>
+
+          {/* 未签名这件事必须**明说**，而不是等用户第一次打开时被
+              Gatekeeper 拦下来才自己猜。写在这里比写在 README 里有用 ——
+              用户装的版本里只有这一个地方能看到。 */}
+          <p className="sub settings-note">
+            个人测试包，未做 Apple 代码签名。首次打开需要在「系统设置 → 隐私与安全性」中允许；
+            更新包经过签名校验，能确认它来自本项目的发布。
+          </p>
         </section>
       </div>
 

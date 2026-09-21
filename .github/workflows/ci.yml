@@ -451,8 +451,26 @@ jobs:
       #
       # 这个脚本会依次跑完 beforeBuildCommand（前端构建）+ Rust release 编译 +
       # 打包 .app，是整条构建链最完整的验证。
+      #
+      # ## 为什么要显式关掉更新产物（createUpdaterArtifacts）
+      #
+      # `tauri.conf.json` 里开了 `bundle.createUpdaterArtifacts: true`，
+      # 那是**发布**需要的（自动更新的 .sig 与 latest.json 靠它）。
+      # 但它有个代价：**没有私钥时构建会直接失败**，而不是跳过签名：
+      #
+      #     A public key has been found, but no private key.
+      #     Make sure to set `TAURI_SIGNING_PRIVATE_KEY` environment variable.
+      #
+      # 私钥只在发布环境（GitHub Secret）里，CI 不该也拿不到它。
+      # 于是这里用 `--config` 把这一项按需关掉 —— 只影响这一次构建，
+      # 不改仓库里的配置。CI 依然完整验证了「能打包」，只是不产更新包。
+      #
+      # 反过来也说明：**发布工作流必须带着私钥跑**，否则它连构建都过不去，
+      # 而且会以一条和「发布失败」长得不太像的报错结束。
       - name: 构建 Tacet.app
-        run: pnpm app:build
+        run: >-
+          pnpm exec tauri build --bundles app
+          --config '{"bundle":{"createUpdaterArtifacts":false}}'
         env:
           # Tauri 在没有签名证书时也能构建 .app，这里显式关掉签名
           APPLE_SIGNING_IDENTITY: "-"
