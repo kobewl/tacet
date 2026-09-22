@@ -214,6 +214,27 @@ export const LEVEL_LABELS: Record<InterventionLevel, string> = {
   5: "升级提醒",
 };
 
+/**
+ * 查需求类型的显示元数据，找不到时退化而不是抛错。
+ *
+ * 后端 NeedKind 按 snake_case 序列化（eye_rest），前端键是 camelCase
+ * （eyeRest）—— rest/hydration/movement 两种口径恰好相同，只有护眼不同，
+ * 曾导致 undefined.label 把整个休息界面崩进兜底错误页。口径漂移时先归一化
+ * 再查；仍查不到（后端加了新类型）就显示原始值，界面降级但不崩。
+ */
+export function needMeta(kind: string): {
+  label: string;
+  icon: string;
+  category: string;
+} {
+  const direct = NEED_META[kind as NeedKind];
+  if (direct) return direct;
+  const camel = kind.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+  const normalized = NEED_META[camel as NeedKind];
+  if (normalized) return normalized;
+  return { label: kind, icon: "❔", category: "other" };
+}
+
 /** 把一条决策依据渲染成给用户看的一句话。 */
 export function reasonText(reason: Reason): string {
   switch (reason.reason) {
@@ -234,9 +255,9 @@ export function reasonText(reason: Reason): string {
     case "do_not_disturb":
       return "勿扰模式已开启";
     case "need_below_threshold":
-      return `${NEED_META[reason.kind].label}需求 ${reason.percent}%，暂时不需要提醒`;
+      return `${needMeta(reason.kind).label}需求 ${reason.percent}%，暂时不需要提醒`;
     case "rate_limited":
-      return `${reason.minutes_ago} 分钟前刚提醒过${NEED_META[reason.kind].label}`;
+      return `${reason.minutes_ago} 分钟前刚提醒过${needMeta(reason.kind).label}`;
     case "context_unavailable":
       return "暂时读不到上下文，按基础规则处理";
   }
