@@ -173,6 +173,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 pnpm --filter @tacet/ui typecheck
 pnpm --filter @tacet/ui lint
 
+# 前端单元测试（vitest，纯逻辑层）
+pnpm --filter @tacet/ui test
+
 # 在浏览器里预览界面（用假数据，不需要启动 Tauri）
 pnpm --filter @tacet/ui dev
 
