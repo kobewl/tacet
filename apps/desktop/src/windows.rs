@@ -345,36 +345,44 @@ fn fit_to_monitor(window: &tauri::WebviewWindow, monitor: &tauri::Monitor) {
 /// 已经正常显示了，核心功能没有丢。因为一个附加的遮挡层而让整个
 /// 休息流程失败，是本末倒置。
 pub fn show_break_veils(app: &AppHandle) -> tauri::Result<()> {
+    show_break_veils_inner(app, true)
+}
+
+/// `verbose`：提醒刚弹出时打完整判断依据；tick 补铺时只在真的新盖上才记。
+fn show_break_veils_inner(app: &AppHandle, verbose: bool) -> tauri::Result<()> {
     let primary = monitor_under_cursor(app);
     let monitors = app.available_monitors()?;
 
-    // ## 为什么这里要打这么详细的日志
-    //
-    // 用户报过「副屏没有被蒙住」，而日志里**一条幕布记录都没有** ——
-    // 查的时候完全看不出它走到哪个分支就返回了。
-    //
-    // 幕布这条链路上每一步都可能静默失败：系统少报一块屏、
-    // 鼠标位置换算偏了、主屏认错……每一种的表现都是「副屏好好的」，
-    // 而原因完全不同。所以把当时的判断依据全记下来 ——
-    // 下次再遇到，一眼就能看到是哪一步。
-    crate::logging::info(&format!(
-        "幕布判断：检测到 {} 块屏 [{}]；鼠标判定在 {:?}",
-        monitors.len(),
-        monitors
-            .iter()
-            .map(|m| {
+    if verbose {
+        crate::logging::info(&format!(
+            "幕布判断：检测到 {} 块屏 [{}]；鼠标判定在 {:?}",
+            monitors.len(),
+            monitors
+                .iter()
+                .map(|m| {
+                    let p = m.position();
+                    let s = m.size();
+                    format!("({},{}) {}x{}", p.x, p.y, s.width, s.height)
+                })
+                .collect::<Vec<_>>()
+                .join(" / "),
+            primary.as_ref().map(|m| {
                 let p = m.position();
                 let s = m.size();
                 format!("({},{}) {}x{}", p.x, p.y, s.width, s.height)
             })
-            .collect::<Vec<_>>()
-            .join(" / "),
-        primary.as_ref().map(|m| {
-            let p = m.position();
-            let s = m.size();
-            format!("({},{}) {}x{}", p.x, p.y, s.width, s.height)
-        })
-    ));
+        ));
+    }
+
+    // 合盖/休眠刚醒时 macOS 会报 0 块屏。主界面照常显示，tick 里再补铺。
+    if monitors.is_empty() {
+        if verbose {
+            crate::logging::warn(
+                "幕布判断：系统此刻报了 0 块屏（常见于刚唤醒）。主界面照常显示，稍后再补铺副屏。",
+            );
+        }
+        return Ok(());
+    }
 
     // 单屏用户（大多数）走这条路：什么都不用做。
     if monitors.len() < 2 {
@@ -389,17 +397,19 @@ pub fn show_break_veils(app: &AppHandle) -> tauri::Result<()> {
     let wanted = wanted_veils(&monitors, primary.as_ref());
 
     if wanted.is_empty() {
-        // 多块屏却说没有一块要盖 —— 只能是因为几块屏的「位置+尺寸」
-        // 完全一样（认成了同一块）。这种事不该发生，记一笔。
-        crate::logging::warn("幕布：有多块屏，但没有一块需要遮挡（屏幕被认成同一块了？）");
+        if verbose {
+            crate::logging::warn("幕布：有多块屏，但没有一块需要遮挡（屏幕被认成同一块了？）");
+        }
         return Ok(());
     }
 
-    crate::logging::info(&format!(
-        "幕布：{} 块屏幕需要遮挡（共检测到 {} 块屏）",
-        wanted.len(),
-        monitors.len()
-    ));
+    if verbose {
+        crate::logging::info(&format!(
+            "幕布：{} 块屏幕需要遮挡（共检测到 {} 块屏）",
+            wanted.len(),
+            monitors.len()
+        ));
+    }
 
     // 收掉不再需要的幕布。用户可能换过显示器 —— 屏幕数量一变，
     // 旧的编号就指到别的屏上了，留着会盖错地方。
@@ -411,10 +421,22 @@ pub fn show_break_veils(app: &AppHandle) -> tauri::Result<()> {
         }
     }
 
+    let mut newly_shown = 0u32;
     for (label, monitor) in &wanted {
         let window = veil_window(app, label)?;
+        let was_visible = window.is_visible().unwrap_or(false);
         fit_to_monitor(&window, monitor);
         window.show()?;
+        if !was_visible {
+            newly_shown += 1;
+        }
+    }
+
+    if !verbose && newly_shown > 0 {
+        crate::logging::info(&format!(
+            "补铺幕布：新显示 {newly_shown} 块（当前检测到 {} 块屏）",
+            monitors.len()
+        ));
     }
 
     Ok(())
@@ -639,6 +661,13 @@ pub fn reconcile_break_windows(app: &AppHandle) {
     // 拿状态当依据会把询问界面一起收掉，那是个 bug。
     if !main.is_visible().unwrap_or(false) {
         hide_break_veils(app);
+        return;
+    }
+
+    // 主窗口还在：显示器可能刚从休眠里回来（当时 available_monitors
+    // 是空的，副屏没盖上）。每 10 秒对一次，漏盖的补上。
+    if let Err(err) = show_break_veils_inner(app, false) {
+        crate::logging::warn(&format!("补铺蒙层失败：{err}"));
     }
 }
 

@@ -2817,7 +2817,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform-macos"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "core-foundation 0.10.1",
  "objc2",
@@ -3864,7 +3864,7 @@ dependencies = [
 
 [[package]]
 name = "tacet-context"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "tacet-core",
@@ -3873,7 +3873,7 @@ dependencies = [
 
 [[package]]
 name = "tacet-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3882,7 +3882,7 @@ dependencies = [
 
 [[package]]
 name = "tacet-desktop"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "objc2",
  "objc2-app-kit",
@@ -3908,7 +3908,7 @@ dependencies = [
 
 [[package]]
 name = "tacet-health"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3917,7 +3917,7 @@ dependencies = [
 
 [[package]]
 name = "tacet-platform"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "tacet-core",
@@ -3926,7 +3926,7 @@ dependencies = [
 
 [[package]]
 name = "tacet-storage"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "rusqlite",
  "serde",

@@ -46,6 +46,9 @@ use tacet_storage::{Database, LocalOffset};
 pub enum TickOutcome {
     /// 什么都不用做。
     Quiet,
+    /// 休息到点。调用方必须把整屏窗口收掉 —— 只改状态不关窗的话，
+    /// 休眠会冻住前端倒计时，窗口会一直停在 05:00。
+    BreakEnded,
     /// 需要发出一次干预。
     Intervene(Box<InterventionDecision>),
 }
@@ -495,7 +498,7 @@ impl AppState {
                     "休息到点，自动结束（超时 {overtime_ms} ms，说明 tick 间隔正常）"
                 ));
                 self.finish_break(now)?;
-                return Ok(TickOutcome::Quiet);
+                return Ok(TickOutcome::BreakEnded);
             }
         }
 
@@ -1687,8 +1690,9 @@ mod tests {
 
         // 把时间推过休息时长
         let after = now.saturating_add_millis(6 * MINUTE);
-        state.tick(after).expect("tick");
+        let outcome = state.tick(after).expect("tick");
 
+        assert_eq!(outcome, TickOutcome::BreakEnded, "到点必须让调用方去关窗");
         assert_eq!(state.work_state(), WorkState::Working);
         assert!(state.break_remaining_seconds(after).is_none());
     }

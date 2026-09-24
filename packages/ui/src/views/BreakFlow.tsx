@@ -41,6 +41,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import { useCountdown, useTacet } from "../hooks/useTacet";
 import { pickQuote } from "../quotes";
+import { isOrphanRestingUi } from "../restingState";
 import {
   formatClock,
   reasonText,
@@ -203,6 +204,31 @@ export function BreakFlow() {
       })();
     }
   }, [stage, remaining]);
+
+  // 后端已经结束、前端还停在「休息中」—— 休眠冻住 JS 计时器后会出现。
+  // 延迟一点再收，避开「刚开始休息、快照还没到」的那一帧。
+  useEffect(() => {
+    if (
+      !isOrphanRestingUi({
+        stage,
+        workState: snapshot?.state,
+        breakTotalSeconds: snapshot?.breakTotalSeconds,
+        remaining,
+      })
+    ) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const intent = await api.endBreak();
+        setRestoredIntent(intent);
+        setStage("done");
+      })();
+    }, 750);
+
+    return () => window.clearTimeout(timer);
+  }, [stage, remaining, snapshot?.state, snapshot?.breakTotalSeconds]);
   const handleStartBreak = useCallback(async () => {
     // 用户自己点了就不用倒计时了
     setAutoRestSeconds(null);

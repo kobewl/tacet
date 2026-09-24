@@ -82,6 +82,12 @@ fn tick_once(app: &AppHandle, state: &Arc<Mutex<AppState>>) {
     match outcome {
         TickOutcome::Quiet => {}
 
+        TickOutcome::BreakEnded => {
+            // 状态已经结束，窗口必须跟着收。前端倒计时在休眠/App Nap
+            // 之后可能冻住，不会自己走到 remaining === 0 那条关窗路径。
+            windows::hide_break_window(app);
+        }
+
         TickOutcome::Intervene(decision) => {
             // 整屏提醒是 v0.1.2 里唯一的打扰形态（四类需求都一样）。
             //
