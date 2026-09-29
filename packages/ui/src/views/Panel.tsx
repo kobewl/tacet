@@ -14,11 +14,16 @@
  *    不该占用注意力。
  */
 
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import * as api from "../api";
 import { useCommand, useTacet } from "../hooks/useTacet";
-import { NEED_META, formatDuration, type NeedKind } from "../types";
+import {
+  NEED_META,
+  formatDuration,
+  formatDurationShort,
+  type NeedKind,
+} from "../types";
 import "./Panel.css";
 
 interface NeedCardProps {
@@ -63,13 +68,15 @@ function NeedCard({
   if (!enabled) {
     status = "已关闭";
   } else if (minutesAgo === null) {
-    status = `${intervalMinutes} 分钟后提醒`;
+    status = `${formatDurationShort(intervalMinutes)}后提醒`;
   } else if (isDone) {
     status = `${formatDuration(minutesAgo)}前`;
-  } else if (isDue) {
+  } else if (isDue || remainingMinutes < 1) {
+    // 需求分数到了，或者倒计时走完了 —— 都是该开口的时候
     status = "该提醒了";
   } else {
-    status = `距提醒 ${remainingMinutes} 分钟`;
+    // 紧凑格式：卡片宽度有限，「距提醒 1 小时 1 分钟」会折行
+    status = `距提醒 ${formatDurationShort(remainingMinutes)}`;
   }
 
   const className = [
@@ -141,6 +148,28 @@ export function Panel() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  /**
+   * 窗口高度跟随内容。
+   *
+   * 面板窗口的初始高度是一个估计值，而真实内容随状态变（勿扰徽标、
+   * 休息中的按钮文案都会改变布局）。量「底部操作区的下缘」就够了：
+   * 上方任何内容的变化最终都体现在它的位置上。失败静默 ——
+   * 窗口保持初始高度只是难看一点，不值得为它打扰用户。
+   */
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell || !api.isTauri()) return;
+
+    const footer = shell.querySelector<HTMLElement>(".panel-footer");
+    if (!footer) return;
+
+    const height = Math.ceil(
+      footer.getBoundingClientRect().bottom - shell.getBoundingClientRect().top,
+    );
+    void api.resizePanel(height).catch(() => {});
+  }, [snapshot]);
+
   if (source === "loading" && !snapshot) {
     return (
       <div className="panel panel-shell">
@@ -170,6 +199,8 @@ export function Panel() {
   const { state, continuousWorkMinutes, needs, reminders } = snapshot;
 
   // 连续工作时长的显示：休息中就不该再显示「连续工作」了。
+  // 用与全界面一致的中文格式 —— 「2m」省的那两个字符，换来的
+  // 是「这个数字和别处的单位不一样」的违和感。
   const headline =
     state === "breaking"
       ? { label: "休息中", value: "—" }
@@ -177,13 +208,11 @@ export function Panel() {
         ? { label: "已暂停", value: "—" }
         : {
             label: "连续工作",
-            value: continuousWorkMinutes >= 60
-              ? `${Math.floor(continuousWorkMinutes / 60)}h ${continuousWorkMinutes % 60}m`
-              : `${continuousWorkMinutes}m`,
+            value: formatDurationShort(continuousWorkMinutes),
           };
 
   return (
-    <div className="panel panel-shell">
+    <div className="panel panel-shell" ref={shellRef}>
       {/* 状态头 */}
       <header className="panel-header">
         <div className="panel-brand">
@@ -232,7 +261,7 @@ export function Panel() {
           intervalMinutes={reminders.movement.intervalMinutes}
           minutesAgo={snapshot.lastActivityMinutesAgo}
           enabled={reminders.movement.enabled}
-          actionLabel="打卡"
+          actionLabel="活动过了"
           onAction={() => act(api.logActivity)}
         />
         <NeedCard
@@ -279,7 +308,7 @@ export function Panel() {
             onClick={() => act(api.logActivity)}
             disabled={busy}
           >
-            活动打卡
+            活动一下
           </button>
         </div>
       </div>

@@ -17,7 +17,7 @@
         "label": "panel",
         "title": "Tacet",
         "width": 376,
-        "height": 520,
+        "height": 410,
         "resizable": false,
         "visible": false,
         "decorations": false,

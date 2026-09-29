@@ -309,7 +309,7 @@ export function reasonText(reason: Reason): string {
   }
 }
 
-/** 把分钟数格式化成「1h 26m」这样的人类可读形式。 */
+/** 把分钟数格式化成「1 小时 26 分钟」这样的人类可读形式。 */
 export function formatDuration(minutes: number): string {
   if (minutes < 1) return "不到 1 分钟";
   if (minutes < 60) return `${Math.round(minutes)} 分钟`;
@@ -318,6 +318,23 @@ export function formatDuration(minutes: number): string {
   const rest = Math.round(minutes % 60);
   if (rest === 0) return `${hours} 小时`;
   return `${hours} 小时 ${rest} 分钟`;
+}
+
+/**
+ * formatDuration 的紧凑变体：「1 小时 2 分」而不是「1 小时 2 分钟」。
+ *
+ * 面板的卡片与顶栏宽度有限，全称会折行 —— 折行的不只是难看，
+ * 还会把卡片撑高、四张卡对不齐。今日页空间充裕，继续用全称；
+ * 两个函数的口径（分钟取整、不足 1 分钟的兜底）保持一致。
+ */
+export function formatDurationShort(minutes: number): string {
+  if (minutes < 1) return "不到 1 分钟";
+  if (minutes < 60) return `${Math.round(minutes)} 分钟`;
+
+  const hours = Math.floor(minutes / 60);
+  const rest = Math.round(minutes % 60);
+  if (rest === 0) return `${hours} 小时`;
+  return `${hours} 小时 ${rest} 分`;
 }
 
 /** 把秒数格式化成倒计时用 mm:ss。 */
