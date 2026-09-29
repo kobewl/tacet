@@ -24,7 +24,7 @@ export type InterventionOutcome = "completed" | "snoozed" | "skipped" | "ignored
  * 一条决策依据。
  *
  * 与 Rust 侧 `Reason` 的 `#[serde(tag = "reason")]` 对应。
- * 之所以用可辨识联合而不是纯字符串：v0.3 的学习模块需要按类型统计
+ * 之所以用可辨识联合而不是纯字符串：v0.4 的学习模块需要按类型统计
  * 「用户最常在哪种理由下跳过提醒」，字符串是没法可靠统计的。
  */
 export type Reason =

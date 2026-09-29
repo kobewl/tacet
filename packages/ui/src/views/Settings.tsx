@@ -635,10 +635,6 @@ export function Settings() {
           <div className="settings-card">
             <AutostartRow />
           </div>
-          <p className="sub settings-note">
-            Tacet 是常驻菜单栏的工具，开机自启后不会弹出窗口 ——
-            它安静地待在菜单栏，到该提醒的时候才出现。
-          </p>
         </section>
 
         {/* ---------------------------------------------- 数据 */}
@@ -668,8 +664,7 @@ export function Settings() {
             ) : null}
           </div>
           <p className="sub settings-note">
-            数据只存在这台电脑上。导出的是明文 CSV，任何表格软件都能打开 ——
-            也因此请妥善保管。
+            数据只存在这台电脑上。导出的是明文 CSV，请妥善保管。
           </p>
         </section>
 
@@ -702,8 +697,8 @@ export function Settings() {
             ))}
           </div>
           <p className="sub settings-note">
-            Tacet 不读取窗口标题、不截屏、不录音。选中的这几项能力都只需要公开 API，
-            不需要辅助功能或屏幕录制权限。
+            Tacet 不读取窗口标题、不截屏、不录音，
+            也不需要辅助功能或屏幕录制权限。
           </p>
         </section>
 
@@ -722,14 +717,6 @@ export function Settings() {
 
             <UpdateRow />
           </div>
-
-          {/* 未签名这件事必须**明说**，而不是等用户第一次打开时被
-              Gatekeeper 拦下来才自己猜。写在这里比写在 README 里有用 ——
-              用户装的版本里只有这一个地方能看到。 */}
-          <p className="sub settings-note">
-            个人测试包，未做 Apple 代码签名。首次打开需要在「系统设置 → 隐私与安全性」中允许；
-            更新包经过签名校验，能确认它来自本项目的发布。
-          </p>
         </section>
       </div>
 

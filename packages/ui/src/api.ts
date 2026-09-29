@@ -371,7 +371,7 @@ const mockSnapshot: AppSnapshot = {
       name: "meeting_detection",
       displayName: "会议检测",
       available: false,
-      reason: "会议检测属于 v0.2 范围",
+      reason: "会议检测属于 v0.3 范围",
     },
   ],
 };
