@@ -676,7 +676,7 @@ impl AppState {
 
         // 先记一条「工作暂停」—— 休息的起点就是这一段连续工作的终点。
         // 今日统计里的「最长连续工作」正是靠这对事件算出来的
-        //（见 scheduler::compute_longest_streak），漏了这条会让那项统计失真。
+        //（见 scheduler::compute_work_summary），漏了这条会让那项统计失真。
         if self.clock.state() == WorkState::Working {
             EventRepo::append(
                 &self.db,
@@ -718,7 +718,7 @@ impl AppState {
     /// `break.completed` 后面直接跟着下一次 `work.started {"from":"idle"}`，
     /// 中间少了一条本该由休息结束产生的事件。
     ///
-    /// 代价落在统计上：`compute_longest_streak` 靠 `work.started` 划分工作
+    /// 代价落在统计上：`compute_work_summary` 靠 `work.started` 划分工作
     /// 区间，缺一条就把「休息前」和「休息后」两段糊成一段，
     /// 今日的「最长连续工作」会系统性偏大。
     pub fn finish_break(
@@ -1359,7 +1359,7 @@ mod tests {
     /// 开始休息要同时留下「暂停工作」和「开始休息」两条记录。
     ///
     /// 只有 `break.started` 而没有 `work.paused` 的话，
-    /// `compute_longest_streak` 会把休息之后的整段时间都算进同一段连续工作里，
+    /// `compute_work_summary` 会把休息之后的整段时间都算进同一段连续工作里，
     /// 「最长连续工作」就会越滚越大。
     #[test]
     fn 开始休息会封住上一段连续工作() {
@@ -1618,7 +1618,7 @@ mod tests {
     /// `self.clock.handle(...)` 的返回值被丢掉了 —— 而状态变更的回调
     /// （`on_work_state_changed`，负责写事件 + 广播）正是挂在这个返回值上的。
     ///
-    /// 后果：`compute_longest_streak` 依赖 `work.started` 来划分工作区间，
+    /// 后果：`compute_work_summary` 依赖 `work.started` 来划分工作区间，
     /// 少一条就等于把「休息前」和「休息后」两段工作糊成了一段，
     /// 今日统计里的「最长连续工作」会系统性偏大。
     #[test]

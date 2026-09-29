@@ -123,6 +123,33 @@ impl EventRepo {
             .collect()
     }
 
+    /// 日期边界之前最后一次工作状态变化，用来判断跨午夜的工作段是否仍在继续。
+    pub fn last_work_boundary_before(
+        db: &Database,
+        before: Timestamp,
+    ) -> Result<Option<BehaviorKind>> {
+        let conn = db.lock();
+        let kind: Option<String> = conn
+            .query_row(
+                "SELECT kind FROM events \
+                 WHERE occurred_at < ?1 AND kind IN (?2, ?3, ?4) \
+                 ORDER BY occurred_at DESC, id DESC LIMIT 1",
+                params![
+                    before.as_millis(),
+                    BehaviorKind::WorkStarted.as_str(),
+                    BehaviorKind::WorkPaused.as_str(),
+                    BehaviorKind::BreakStarted.as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        kind.map(|value| {
+            BehaviorKind::parse(&value).ok_or_else(|| data_error("未知的工作状态事件", &value))
+        })
+        .transpose()
+    }
+
     /// 统计某个时间区间内某类事件发生了多少次。
     ///
     /// 这是统计页要用到的核心查询：「今天喝了 6 次水」就是
@@ -260,6 +287,33 @@ mod tests {
 
     fn t0() -> Timestamp {
         Timestamp::from_millis(1_700_000_000_000)
+    }
+
+    #[test]
+    fn 跨日查询只看零点前最后一次工作状态变化() {
+        let db = Database::open_in_memory().expect("打开");
+        let midnight = Timestamp::from_millis(1_700_006_400_000);
+        EventRepo::append(
+            &db,
+            BehaviorKind::WorkPaused,
+            "{}",
+            midnight.saturating_sub_millis(30_000),
+        )
+        .expect("写入");
+        EventRepo::append(&db, BehaviorKind::WaterLogged, "{}", midnight).expect("写入");
+        EventRepo::append(
+            &db,
+            BehaviorKind::WorkStarted,
+            "{}",
+            midnight.saturating_sub_millis(10_000),
+        )
+        .expect("写入");
+        EventRepo::append(&db, BehaviorKind::WorkPaused, "{}", midnight).expect("写入");
+
+        assert_eq!(
+            EventRepo::last_work_boundary_before(&db, midnight).expect("查询"),
+            Some(BehaviorKind::WorkStarted)
+        );
     }
 
     #[test]

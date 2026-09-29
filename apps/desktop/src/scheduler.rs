@@ -178,7 +178,7 @@ pub fn build_snapshot(state: &AppState) -> Option<serde_json::Value> {
 
     // 今日统计 —— 日期边界在这里算好（数据模型 §8：UI 禁止自行计算）
     let today = DateWindow::day_of(now, state.offset);
-    let today_summary = build_today_summary(state, &today);
+    let today_summary = build_today_summary(state, &today, now);
 
     let pending_intent = IntentRepo::latest_unrestored(&state.db)
         .ok()
@@ -255,7 +255,11 @@ pub fn build_snapshot(state: &AppState) -> Option<serde_json::Value> {
 }
 
 /// 组装今日统计。
-fn build_today_summary(state: &AppState, today: &tacet_storage::DateWindow) -> serde_json::Value {
+pub(crate) fn build_today_summary(
+    state: &AppState,
+    today: &tacet_storage::DateWindow,
+    now: Timestamp,
+) -> serde_json::Value {
     use tacet_core::model::BehaviorKind;
     use tacet_storage::repo::{EventRepo, InterventionRepo};
 
@@ -263,15 +267,13 @@ fn build_today_summary(state: &AppState, today: &tacet_storage::DateWindow) -> s
         EventRepo::count_in_window(&state.db, kind, today).unwrap_or(0)
     };
 
-    // 累计工作与时长的口径比较复杂（要扣除空闲段），属于 v0.3 统计页的工作。
-    // v0.1 先用「最长的连续工作」与「今日事件数」给出可用的数字。
-    let longest = compute_longest_streak(state, today);
+    let work = compute_work_summary(state, today, now);
 
     let stats = InterventionRepo::stats_in_window(&state.db, today).unwrap_or_default();
 
     serde_json::json!({
-        "workMinutes": longest,
-        "longestStreakMinutes": longest,
+        "workMinutes": work.total_minutes,
+        "longestStreakMinutes": work.longest_minutes,
         "waterCount": count(BehaviorKind::WaterLogged),
         "activityCount": count(BehaviorKind::ActivityLogged),
         "breakCompletedCount": count(BehaviorKind::BreakCompleted),
@@ -281,33 +283,57 @@ fn build_today_summary(state: &AppState, today: &tacet_storage::DateWindow) -> s
     })
 }
 
-/// 从今日事件里估出「最长连续工作」时长（分钟）。
-///
-/// ## 口径
-///
-/// 读今天的 `work.started` / `work.paused` 事件，把成对的区间长度算出来，
-/// 取最长的一段。
-///
-/// ## 为什么是「估」
-///
-/// 严格的口径要扣除 Idle ≥ 5 分钟的时间（数据模型 §8），那需要记录
-/// 每一次空闲开始/结束的完整序列。v0.1 的 `events` 表里只有
-/// `work.started` / `work.paused` 这类节点事件，中间的空闲段没有落库。
-///
-/// 所以这里是**基于现有数据能做到的最好估计**。v0.3 的统计页会引入
-/// 完整的区间口径。现在这个数字用于「今天大概干了多久」是够用的，
-/// 而不会声称它精确。
-fn compute_longest_streak(state: &AppState, today: &tacet_storage::DateWindow) -> u32 {
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WorkSummary {
+    total_minutes: u32,
+    longest_minutes: u32,
+}
+
+/// 累加当天每段工作，并把跨午夜的工作段裁到当天边界。
+fn compute_work_summary(
+    state: &AppState,
+    today: &tacet_storage::DateWindow,
+    now: Timestamp,
+) -> WorkSummary {
     use tacet_core::model::BehaviorKind;
     use tacet_storage::repo::EventRepo;
 
     let events = match EventRepo::in_window(&state.db, today) {
         Ok(events) => events,
-        Err(_) => return 0,
+        Err(_) => return WorkSummary::default(),
     };
+    let carried = matches!(
+        EventRepo::last_work_boundary_before(&state.db, today.start),
+        Ok(Some(BehaviorKind::WorkStarted))
+    );
+    work_summary_from_events(
+        &events,
+        today,
+        now,
+        carried,
+        state.clock.state() == tacet_core::state::WorkState::Working,
+    )
+}
 
+fn work_summary_from_events(
+    events: &[tacet_storage::repo::EventRow],
+    today: &tacet_storage::DateWindow,
+    now: Timestamp,
+    carried: bool,
+    working_now: bool,
+) -> WorkSummary {
+    use tacet_core::model::BehaviorKind;
+
+    let end = now.min(today.end);
+    let mut total_ms: i64 = 0;
     let mut longest_ms: i64 = 0;
-    let mut started_at: Option<Timestamp> = None;
+    let mut started_at = carried.then_some(today.start);
+
+    let mut finish = |start: Timestamp, stop: Timestamp| {
+        let span = stop.min(end).millis_since(start.max(today.start)).max(0);
+        total_ms += span;
+        longest_ms = longest_ms.max(span);
+    };
 
     for event in events {
         match event.kind {
@@ -316,21 +342,24 @@ fn compute_longest_streak(state: &AppState, today: &tacet_storage::DateWindow) -
             }
             BehaviorKind::WorkPaused | BehaviorKind::BreakStarted => {
                 if let Some(start) = started_at.take() {
-                    let span = event.occurred_at.millis_since(start).max(0);
-                    longest_ms = longest_ms.max(span);
+                    finish(start, event.occurred_at);
                 }
             }
             _ => {}
         }
     }
 
-    // 还在进行中的这一段也算上
-    if let Some(start) = started_at {
-        let span = Timestamp::now().millis_since(start).max(0);
-        longest_ms = longest_ms.max(span);
+    // 只有当前状态仍在工作，才把未闭合的一段计到此刻；崩溃遗留的开始事件不续算。
+    if working_now {
+        if let Some(start) = started_at {
+            finish(start, end);
+        }
     }
 
-    (longest_ms / tacet_core::time::MINUTE) as u32
+    WorkSummary {
+        total_minutes: (total_ms / tacet_core::time::MINUTE) as u32,
+        longest_minutes: (longest_ms / tacet_core::time::MINUTE) as u32,
+    }
 }
 
 fn rule_json(rule: &tacet_core::model::ReminderRule) -> serde_json::Value {
@@ -391,10 +420,69 @@ fn update_tray_title(app: &AppHandle, snapshot: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tacet_core::model::BehaviorKind;
     use tacet_platform::MockPlatform;
+    use tacet_storage::repo::EventRow;
+    use tacet_storage::{DateWindow, LocalOffset};
 
     fn state() -> AppState {
         AppState::in_memory(Box::new(MockPlatform::new())).expect("建立状态")
+    }
+
+    fn event(kind: BehaviorKind, at: Timestamp) -> EventRow {
+        EventRow {
+            id: 0,
+            kind,
+            payload: "{}".to_string(),
+            occurred_at: at,
+            created_at: at,
+        }
+    }
+
+    #[test]
+    fn 今日累计工作会累加多段而最长连续只取一段() {
+        let today = DateWindow::day_of(Timestamp::from_millis(0), LocalOffset::utc());
+        let at = |minutes: i64| today.start.saturating_add_millis(minutes * 60_000);
+        let events = vec![
+            event(BehaviorKind::WorkStarted, at(10)),
+            event(BehaviorKind::WorkPaused, at(30)),
+            event(BehaviorKind::WorkStarted, at(40)),
+            event(BehaviorKind::WorkPaused, at(70)),
+        ];
+
+        assert_eq!(
+            work_summary_from_events(&events, &today, at(80), false, false),
+            WorkSummary {
+                total_minutes: 50,
+                longest_minutes: 30,
+            }
+        );
+    }
+
+    #[test]
+    fn 跨午夜工作段从当天零点计入并包含当前进行中的时间() {
+        let today = DateWindow::day_of(Timestamp::from_millis(0), LocalOffset::utc());
+        let at = |minutes: i64| today.start.saturating_add_millis(minutes * 60_000);
+        let events = vec![
+            event(BehaviorKind::WorkPaused, at(90)),
+            event(BehaviorKind::WorkStarted, at(120)),
+        ];
+
+        assert_eq!(
+            work_summary_from_events(&events, &today, at(140), true, true),
+            WorkSummary {
+                total_minutes: 110,
+                longest_minutes: 90,
+            }
+        );
+        assert_eq!(
+            work_summary_from_events(&events, &today, at(140), true, false),
+            WorkSummary {
+                total_minutes: 90,
+                longest_minutes: 90,
+            },
+            "应用重启后留下的未闭合记录不应一直算到现在"
+        );
     }
 
     /// 回归测试：快照里的 `breakTotalSeconds` 必须真的送到界面上。

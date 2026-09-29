@@ -81,25 +81,7 @@ pub fn get_today_summary(state: State<'_, SharedState>) -> CmdResult<serde_json:
 
     let now = tacet_core::Timestamp::now();
     let today = tacet_storage::DateWindow::day_of(now, guard.offset);
-
-    use tacet_core::model::BehaviorKind;
-    use tacet_storage::repo::{EventRepo, InterventionRepo};
-
-    let count =
-        |kind: BehaviorKind| EventRepo::count_in_window(&guard.db, kind, &today).unwrap_or(0);
-
-    let stats = InterventionRepo::stats_in_window(&guard.db, &today).unwrap_or_default();
-
-    Ok(serde_json::json!({
-        "workMinutes": guard.continuous_work_minutes(),
-        "longestStreakMinutes": guard.continuous_work_minutes(),
-        "waterCount": count(BehaviorKind::WaterLogged),
-        "activityCount": count(BehaviorKind::ActivityLogged),
-        "breakCompletedCount": count(BehaviorKind::BreakCompleted),
-        "breakSkippedCount": count(BehaviorKind::BreakSkipped),
-        "breakSnoozedCount": count(BehaviorKind::BreakSnoozed),
-        "acceptanceRate": stats.acceptance_rate(),
-    }))
+    Ok(scheduler::build_today_summary(&guard, &today, now))
 }
 
 /// 取用户偏好。

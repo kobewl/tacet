@@ -88,10 +88,12 @@ export function Today() {
             <Stat
               label="累计工作"
               value={formatDuration(today.workMinutes)}
+              hint="当天各段工作时间之和，离开超阈值才断开"
             />
             <Stat
               label="最长连续"
               value={formatDuration(today.longestStreakMinutes)}
+              hint="当天最长的一段工作时间"
             />
           </div>
         </section>
