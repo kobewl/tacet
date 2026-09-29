@@ -76,6 +76,50 @@ export interface TodaySummary {
   acceptanceRate: number | null;
 }
 
+/** 最近 7 天里的某一天。Rust 侧已按本地自然日切好，旧 → 新排列。 */
+export interface WeekDaySummary {
+  /** 本地日期，`YYYY-MM-DD`。 */
+  date: string;
+  /** 周几。0 = 周一 … 6 = 周日。 */
+  weekday: number;
+  /** 是否是今天。 */
+  isToday: boolean;
+  /** 累计工作（分钟），口径与「今日」页一致。 */
+  workMinutes: number;
+  /** 最长连续（分钟）。 */
+  longestStreakMinutes: number;
+  /** 喝水次数。 */
+  waterCount: number;
+  /** 活动次数。 */
+  activityCount: number;
+  /** 完成的休息次数。 */
+  breakCompletedCount: number;
+}
+
+/** 最近 7 天统计（滚动窗口，不是「本周一到今天」）。 */
+export interface WeekSummary {
+  /** 七天，旧 → 新，最后一天是今天。 */
+  days: WeekDaySummary[];
+  /** 七天累计工作（分钟）。 */
+  workMinutes: number;
+  /** 七天喝水次数。 */
+  waterCount: number;
+  /** 七天活动次数。 */
+  activityCount: number;
+  /** 七天完成的休息次数。 */
+  breakCompletedCount: number;
+  /** 七天接受率（0~1）；没有数据时为 null。 */
+  acceptanceRate: number | null;
+}
+
+/** 一次数据导出产出的两个文件路径。 */
+export interface ExportedRecords {
+  /** 行为记录（CSV）。 */
+  eventsPath: string;
+  /** 干预记录（CSV）。 */
+  interventionsPath: string;
+}
+
 /** 一类提醒的配置。对应 `tacet_core::model::ReminderRule`。 */
 export interface ReminderRule {
   enabled: boolean;
@@ -116,6 +160,8 @@ export interface AppSnapshot {
   lastEyeRestMinutesAgo: number | null;
   /** 今日统计。 */
   today: TodaySummary;
+  /** 最近 7 天统计。 */
+  week: WeekSummary;
   /** 勿扰模式是否开启。 */
   doNotDisturb: boolean;
   /** 当前暂停的 Intent（如果有一条尚未恢复的）。 */

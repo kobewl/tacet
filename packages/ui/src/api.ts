@@ -20,6 +20,7 @@
 import type {
   AppSnapshot,
   Decision,
+  ExportedRecords,
   IntentRecord,
   NeedKind,
   TodaySummary,
@@ -99,6 +100,14 @@ export const getSnapshot = () => invoke<AppSnapshot>("get_snapshot");
 
 /** 取今日统计。 */
 export const getTodaySummary = () => invoke<TodaySummary>("get_today_summary");
+
+/**
+ * 把全部记录导出为 CSV，返回两个文件的路径。
+ *
+ * Rust 侧会顺手在访达里打开所在文件夹；这里的返回值只用于
+ * 在设置页上展示「导出到哪了」，展示失败不影响导出本身。
+ */
+export const exportRecords = () => invoke<ExportedRecords>("export_records");
 
 /** 取用户偏好。 */
 export const getPreferences = () => invoke<UserPreferences>("get_preferences");
@@ -314,6 +323,24 @@ const mockSnapshot: AppSnapshot = {
     breakSkippedCount: 1,
     breakSnoozedCount: 1,
     acceptanceRate: 0.67,
+  },
+  // 浏览器预览用的假周数据（2026-09-23 周三 → 2026-09-29 周二）。
+  // weekday 与 date 必须对得上，预览图才像真的。
+  week: {
+    days: [
+      { date: "2026-09-23", weekday: 2, isToday: false, workMinutes: 186, longestStreakMinutes: 74, waterCount: 5, activityCount: 2, breakCompletedCount: 3 },
+      { date: "2026-09-24", weekday: 3, isToday: false, workMinutes: 243, longestStreakMinutes: 96, waterCount: 4, activityCount: 3, breakCompletedCount: 2 },
+      { date: "2026-09-25", weekday: 4, isToday: false, workMinutes: 157, longestStreakMinutes: 55, waterCount: 6, activityCount: 2, breakCompletedCount: 4 },
+      { date: "2026-09-26", weekday: 5, isToday: false, workMinutes: 92, longestStreakMinutes: 48, waterCount: 3, activityCount: 1, breakCompletedCount: 1 },
+      { date: "2026-09-27", weekday: 6, isToday: false, workMinutes: 0, longestStreakMinutes: 0, waterCount: 2, activityCount: 0, breakCompletedCount: 0 },
+      { date: "2026-09-28", weekday: 0, isToday: false, workMinutes: 205, longestStreakMinutes: 81, waterCount: 5, activityCount: 3, breakCompletedCount: 3 },
+      { date: "2026-09-29", weekday: 1, isToday: true, workMinutes: 214, longestStreakMinutes: 62, waterCount: 4, activityCount: 3, breakCompletedCount: 2 },
+    ],
+    workMinutes: 1097,
+    waterCount: 29,
+    activityCount: 14,
+    breakCompletedCount: 15,
+    acceptanceRate: 0.71,
   },
   doNotDisturb: false,
   pendingIntent: null,

@@ -179,6 +179,7 @@ pub fn build_snapshot(state: &AppState) -> Option<serde_json::Value> {
     // 今日统计 —— 日期边界在这里算好（数据模型 §8：UI 禁止自行计算）
     let today = DateWindow::day_of(now, state.offset);
     let today_summary = build_today_summary(state, &today, now);
+    let week_summary = build_week_summary(state, now);
 
     let pending_intent = IntentRepo::latest_unrestored(&state.db)
         .ok()
@@ -242,6 +243,7 @@ pub fn build_snapshot(state: &AppState) -> Option<serde_json::Value> {
         "lastActivityMinutesAgo": minutes_since(BehaviorKind::ActivityLogged),
         "lastEyeRestMinutesAgo": minutes_since(BehaviorKind::EyeRestLogged),
         "today": today_summary,
+        "week": week_summary,
         "doNotDisturb": prefs.do_not_disturb,
         "pendingIntent": pending_intent,
         "lastDecision": last_decision,
@@ -280,6 +282,108 @@ pub(crate) fn build_today_summary(
         "breakSkippedCount": count(BehaviorKind::BreakSkipped),
         "breakSnoozedCount": count(BehaviorKind::BreakSnoozed),
         "acceptanceRate": stats.acceptance_rate(),
+    })
+}
+
+/// 组装「最近 7 天」统计（含今天，旧 → 新）。
+///
+/// ## 为什么是「滚动 7 天」而不是「本周」
+///
+/// 周一早晨打开应用，「本周一到今天」几乎是空的 —— 用户看到的是一个
+/// 没法解读的空图。滚动 7 天永远有内容，语义也更好解释：
+/// 人们说「这周怎么样」时，想问的其实就是「最近这几天」。
+///
+/// ## 性能
+///
+/// 事件用**一次**区间查询拿全量、在内存里按天分桶 —— 而不是
+/// 7 天 × 4 类 = 28 次查询。每天一次的 carried 判定与一次整周的接受率
+/// 例外，合计约 9 次走索引的查询，快照级的调用频率下毫无压力。
+pub(crate) fn build_week_summary(state: &AppState, now: Timestamp) -> serde_json::Value {
+    use tacet_core::model::BehaviorKind;
+    use tacet_storage::repo::{EventRepo, InterventionRepo};
+
+    let offset = state.offset;
+    let days: Vec<tacet_storage::DateWindow> = (0..7)
+        .rev()
+        .map(|back| {
+            tacet_storage::DateWindow::day_of(
+                now.saturating_sub_millis(back as i64 * 86_400_000),
+                offset,
+            )
+        })
+        .collect();
+
+    let window = tacet_storage::DateWindow {
+        start: days[0].start,
+        end: days[6].end,
+        day_index: days[0].day_index,
+    };
+    let events = EventRepo::in_window(&state.db, &window).unwrap_or_default();
+    let working_now = state.clock.state() == tacet_core::state::WorkState::Working;
+
+    let mut day_values = Vec::with_capacity(days.len());
+    let mut total_work = 0u32;
+    let mut total_water = 0u32;
+    let mut total_activity = 0u32;
+    let mut total_breaks = 0u32;
+
+    for (index, day) in days.iter().enumerate() {
+        // 跨午夜的工作段是否在继续：看这一天零点前最后一次工作状态变化
+        let carried = matches!(
+            EventRepo::last_work_boundary_before(&state.db, day.start),
+            Ok(Some(BehaviorKind::WorkStarted))
+        );
+        let day_events: Vec<tacet_storage::repo::EventRow> = events
+            .iter()
+            .filter(|event| day.contains(event.occurred_at))
+            .cloned()
+            .collect();
+
+        // 「进行中的工作续算到此刻」只对今天成立：历史日子没有「此刻」，
+        // 未闭合的段在那里只会来自崩溃或强退，续算等于编造数据。
+        let summary = work_summary_from_events(
+            &day_events,
+            day,
+            now,
+            carried,
+            working_now && index == days.len() - 1,
+        );
+
+        let count = |kind: BehaviorKind| {
+            day_events.iter().filter(|event| event.kind == kind).count() as u32
+        };
+        let water = count(BehaviorKind::WaterLogged);
+        let activity = count(BehaviorKind::ActivityLogged);
+        let breaks = count(BehaviorKind::BreakCompleted);
+        total_work += summary.total_minutes;
+        total_water += water;
+        total_activity += activity;
+        total_breaks += breaks;
+
+        day_values.push(serde_json::json!({
+            "date": day.format_date(),
+            // 0 = 周一 … 6 = 周日（1970-01-01 是周四，+3 对齐到周一）
+            "weekday": (day.day_index() + 3).rem_euclid(7),
+            "isToday": day.is_today(now, offset),
+            "workMinutes": summary.total_minutes,
+            "longestStreakMinutes": summary.longest_minutes,
+            "waterCount": water,
+            "activityCount": activity,
+            "breakCompletedCount": breaks,
+        }));
+    }
+
+    let acceptance = InterventionRepo::stats_in_window(&state.db, &window)
+        .ok()
+        .and_then(|stats| stats.acceptance_rate());
+
+    serde_json::json!({
+        "days": day_values,
+        "workMinutes": total_work,
+        "waterCount": total_water,
+        "activityCount": total_activity,
+        "breakCompletedCount": total_breaks,
+        "acceptanceRate": acceptance,
     })
 }
 
@@ -483,6 +587,90 @@ mod tests {
             },
             "应用重启后留下的未闭合记录不应一直算到现在"
         );
+    }
+
+    /// 周统计的关键契约：事件按本地自然日分桶，各天之和等于汇总；
+    /// 今天那格的未闭合工作段在时钟不在工作态时不续算（与「今日」口径一致）。
+    #[test]
+    fn 周统计按天分桶且汇总等于各天之和() {
+        use tacet_storage::repo::EventRepo;
+
+        let state = state();
+        let now = Timestamp::now();
+        let offset = state.offset;
+        let today = DateWindow::day_of(now, offset);
+        let yesterday = DateWindow::from_day_index(today.day_index() - 1, offset);
+        let six_days_ago = DateWindow::from_day_index(today.day_index() - 6, offset);
+
+        // 昨天：一段完整的工作（本地 9:00–9:30）和两次喝水
+        let at = |day: &DateWindow, minutes: i64| {
+            day.local_midnight().saturating_add_millis(minutes * 60_000)
+        };
+        EventRepo::append(
+            &state.db,
+            BehaviorKind::WorkStarted,
+            "{}",
+            at(&yesterday, 9 * 60),
+        )
+        .expect("写入");
+        EventRepo::append(
+            &state.db,
+            BehaviorKind::WorkPaused,
+            "{}",
+            at(&yesterday, 9 * 60 + 30),
+        )
+        .expect("写入");
+        EventRepo::append(
+            &state.db,
+            BehaviorKind::WaterLogged,
+            "{}",
+            at(&yesterday, 10 * 60),
+        )
+        .expect("写入");
+        EventRepo::append(
+            &state.db,
+            BehaviorKind::WaterLogged,
+            "{}",
+            at(&yesterday, 11 * 60),
+        )
+        .expect("写入");
+
+        // 6 天前：一次完成的休息
+        EventRepo::append(
+            &state.db,
+            BehaviorKind::BreakCompleted,
+            "{}",
+            at(&six_days_ago, 60),
+        )
+        .expect("写入");
+
+        // 今天：一段还没闭合的工作（时钟不在工作态 = 重启后遗留，不续算）
+        EventRepo::append(&state.db, BehaviorKind::WorkStarted, "{}", at(&today, 60))
+            .expect("写入");
+
+        let week = build_week_summary(&state, now);
+        let days = week["days"].as_array().expect("days 数组");
+
+        assert_eq!(days.len(), 7);
+        assert_eq!(days[6]["isToday"].as_bool(), Some(true));
+        assert_eq!(
+            days[0]["date"].as_str(),
+            Some(six_days_ago.format_date().as_str())
+        );
+
+        assert_eq!(days[5]["workMinutes"].as_u64(), Some(30));
+        assert_eq!(days[5]["waterCount"].as_u64(), Some(2));
+        assert_eq!(days[5]["longestStreakMinutes"].as_u64(), Some(30));
+        assert_eq!(days[0]["breakCompletedCount"].as_u64(), Some(1));
+        assert_eq!(
+            days[6]["workMinutes"].as_u64(),
+            Some(0),
+            "未闭合且不在工作态的段不应续算"
+        );
+
+        assert_eq!(week["workMinutes"].as_u64(), Some(30));
+        assert_eq!(week["waterCount"].as_u64(), Some(2));
+        assert_eq!(week["breakCompletedCount"].as_u64(), Some(1));
     }
 
     /// 回归测试：快照里的 `breakTotalSeconds` 必须真的送到界面上。

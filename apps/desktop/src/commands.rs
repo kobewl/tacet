@@ -708,6 +708,33 @@ pub fn get_capabilities(state: State<'_, SharedState>) -> CmdResult<Vec<serde_js
         .collect())
 }
 
+/// 把全部记录导出为 CSV，并在访达里打开所在文件夹。
+///
+/// 设置页「数据」区用的就是它。一次导出两个文件（行为 / 干预），
+/// 把路径返回给界面展示 —— 「打开文件夹」失败了不打紧：
+/// 路径已经在界面上，用户自己找得到，不值得为它弹一个错误。
+#[tauri::command]
+pub fn export_records(state: State<'_, SharedState>) -> CmdResult<serde_json::Value> {
+    let guard = AppState::lock(&state);
+    let dir = tacet_storage::path::default_exports_dir()?;
+    let files = tacet_storage::export::export_csv(
+        &guard.db,
+        &dir,
+        tacet_core::Timestamp::now(),
+        guard.offset,
+    )?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&dir).spawn();
+    }
+
+    Ok(serde_json::json!({
+        "eventsPath": files.events_csv.to_string_lossy(),
+        "interventionsPath": files.interventions_csv.to_string_lossy(),
+    }))
+}
+
 /// 打开设置窗口。
 ///
 /// ## 为什么成功也要记日志

@@ -442,6 +442,13 @@ export function Settings() {
   const [savedAt, setSavedAt] = useState<number | null>(null);
   /** 应用版本，从二进制里读（更新后这里会跟着变）。 */
   const [appVersion, setAppVersion] = useState("…");
+  /** 导出记录的状态：结果路径或失败原因只在这里展示，不影响页面其它部分。 */
+  const [exportStatus, setExportStatus] = useState<
+    { kind: "idle" }
+    | { kind: "busy" }
+    | { kind: "done"; path: string }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
 
   // 首屏读一次偏好
   useEffect(() => {
@@ -497,6 +504,20 @@ export function Settings() {
   };
 
   const capabilities = snapshot?.capabilities ?? [];
+
+  // 导出不用全局的 useCommand：它失败时应当只影响「数据」这一小块的展示，
+  // 而不是让整个设置页进入 busy 态。
+  const exportRecords = () => {
+    setExportStatus({ kind: "busy" });
+    void api
+      .exportRecords()
+      .then((files) =>
+        setExportStatus({ kind: "done", path: files.eventsPath }),
+      )
+      .catch((err) =>
+        setExportStatus({ kind: "error", message: api.errorMessage(err) }),
+      );
+  };
 
   return (
     <div className="panel settings-shell">
@@ -617,6 +638,38 @@ export function Settings() {
           <p className="sub settings-note">
             Tacet 是常驻菜单栏的工具，开机自启后不会弹出窗口 ——
             它安静地待在菜单栏，到该提醒的时候才出现。
+          </p>
+        </section>
+
+        {/* ---------------------------------------------- 数据 */}
+        <section className="settings-section">
+          <div className="kicker settings-section-title">数据</div>
+          <div className="settings-card">
+            <div className="setting-row compact">
+              <div className="setting-row-body wide">
+                <div className="setting-row-name">导出全部记录</div>
+                <div className="sub">
+                  行为与干预两个 CSV 文件，存到数据目录的 exports 里
+                </div>
+              </div>
+              <button
+                className="btn"
+                onClick={exportRecords}
+                disabled={exportStatus.kind === "busy"}
+              >
+                {exportStatus.kind === "busy" ? "导出中…" : "导出"}
+              </button>
+            </div>
+            {exportStatus.kind === "done" ? (
+              <div className="sub">已导出到 {exportStatus.path}</div>
+            ) : null}
+            {exportStatus.kind === "error" ? (
+              <div className="sub">导出失败：{exportStatus.message}</div>
+            ) : null}
+          </div>
+          <p className="sub settings-note">
+            数据只存在这台电脑上。导出的是明文 CSV，任何表格软件都能打开 ——
+            也因此请妥善保管。
           </p>
         </section>
 

@@ -78,6 +78,61 @@
   font-size: var(--text-xs);
 }
 
+/* ------------------------------------------------ 最近 7 天 */
+
+/* 一根柱子看节奏，不画趋势线不画对比环 —— 统计是「回看的凭据」，
+   不是「仪表盘」。配色用青灰绿（休息语义），今天那格用品牌青稍微突出。 */
+.week-chart {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.week-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.week-bar-track {
+  width: 100%;
+  height: 64px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: rgba(11, 13, 16, 0.035);
+  overflow: hidden;
+}
+
+.week-bar {
+  width: 62%;
+  /* 0 分钟的日子也留一个 3px 的底：柱子完全消失看起来像「坏了」 */
+  min-height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: var(--accent-rest);
+  transition: height var(--duration-normal) var(--ease-out);
+}
+
+.week-day-label {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  line-height: 1;
+}
+
+/* 今天：柱子与文字用品牌青，那是整套配色里「此刻」的颜色 */
+.week-today .week-bar {
+  background: var(--brand);
+}
+
+.week-today .week-day-label {
+  color: var(--brand);
+  font-weight: 600;
+}
+
 .today-detail-row {
   display: flex;
   align-items: center;

@@ -1,20 +1,19 @@
 /**
  * 今日统计。
  *
- * ## v0.1 的定位：只有原始数据，没有花哨的可视化
+ * ## 定位：朴素地透明
  *
- * 路线图把「统计页面（Dashboard / 周视图 / 趋势）」明确划到 v0.3，
- * v0.1 的交付物是「只有原始数据」。所以这一屏刻意做得很朴素：
- * 几个数字，没有图表。
- *
- * 为什么还是做了这一屏而不是完全不做：用户需要能**验证**这个工具到底
- * 记了什么。一个只看得到「连续工作 1h32m」却不给任何回看入口的工具，
+ * v0.1 的交付物是「只有原始数据」；v0.2 补上了「最近 7 天」的小柱状图，
+ * 但尺度依然刻意压着：一根柱子看节奏，没有趋势线、没有对比环。
+ * 做这一屏的根本原因是：用户需要能**验证**这个工具到底记了什么。
+ * 一个只看得到「连续工作 1h32m」却不给任何回看入口的工具，
  * 会让人怀疑它在偷偷记录别的东西 —— 透明本身就是产品原则。
  *
  * ## 数字口径
  *
  * 所有这些数字都由 Rust 侧算好（数据模型 §8 的工程约束：
- * UI 层禁止自行计算日期边界）。这里只负责显示。
+ * UI 层禁止自行计算日期边界，柱高分母这类纯展示换算除外）。
+ * 这里只负责显示。
  *
  * ## 一个文案细节
  *
@@ -25,6 +24,9 @@
 import { useTacet } from "../hooks/useTacet";
 import { formatDuration } from "../types";
 import "./Today.css";
+
+/** 周几的显示字。下标即 Rust 侧的 weekday：0 = 周一。 */
+const WEEKDAY_LABELS = ["一", "二", "三", "四", "五", "六", "日"];
 
 interface StatProps {
   label: string;
@@ -54,7 +56,11 @@ export function Today() {
     );
   }
 
-  const { today, state, continuousWorkMinutes } = snapshot;
+  const { today, week, state, continuousWorkMinutes } = snapshot;
+
+  // 柱高的分母：至少 60 分钟 —— 否则「某天只干了 10 分钟」会让柱子看不见，
+  // 而「几乎没工作」和「没有数据」是两种不同的信息
+  const weekMax = Math.max(60, ...week.days.map((day) => day.workMinutes));
 
   // 接受率：没有数据时给「暂无数据」，而不是 0%
   const acceptance =
@@ -119,6 +125,43 @@ export function Today() {
                   : undefined
               }
             />
+          </div>
+        </section>
+
+        {/* 最近 7 天 —— 日期、周几、「今天」的判定都在 Rust 侧算好，
+            这里只负责画柱子。滚动 7 天而不是「本周」：周一看「本周」几乎是空的。 */}
+        <section className="today-section">
+          <div className="kicker today-section-title">最近 7 天</div>
+          <div
+            className="week-chart"
+            role="img"
+            aria-label={`最近 7 天累计工作 ${formatDuration(week.workMinutes)}，喝水 ${week.waterCount} 次，完成休息 ${week.breakCompletedCount} 次`}
+          >
+            {week.days.map((day) => (
+              <div
+                className={day.isToday ? "week-col week-today" : "week-col"}
+                key={day.date}
+              >
+                <div className="week-bar-track">
+                  <div
+                    className="week-bar"
+                    style={{
+                      height: `${Math.round((day.workMinutes / weekMax) * 100)}%`,
+                    }}
+                  />
+                </div>
+                <div className="sub week-day-label">
+                  {day.isToday ? "今天" : `周${WEEKDAY_LABELS[day.weekday]}`}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="today-detail-row">
+            <span className="sub">工作 {formatDuration(week.workMinutes)}</span>
+            <span className="today-detail-dot">·</span>
+            <span className="sub">喝水 {week.waterCount} 次</span>
+            <span className="today-detail-dot">·</span>
+            <span className="sub">完成休息 {week.breakCompletedCount} 次</span>
           </div>
         </section>
 

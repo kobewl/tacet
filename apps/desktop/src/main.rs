@@ -168,6 +168,7 @@ fn main() {
             commands::resume_tracking,
             commands::preview_reminder,
             commands::get_capabilities,
+            commands::export_records,
             commands::open_settings_window,
             commands::open_today_window,
             commands::close_current_window,
