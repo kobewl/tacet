@@ -8,7 +8,7 @@
 > ✅ 当前状态：**V0.1 已完成可运行的 macOS 应用**（Foundation 基础闭环）
 >
 > `Tacet.app` 能构建、能启动，核心链路端到端跑通：状态机 → 需求评分 →
-> 时机判断 → 决策 → 干预 → 落库。382 个测试全绿，clippy 零警告。
+> 时机判断 → 决策 → 干预 → 落库。395 个测试全绿，clippy 零警告。
 
 ---
 
@@ -96,11 +96,15 @@ Tacet 的解药：把「**打扰的成本**」提升为一等公民，与「**�
 
 ## 路线图
 
-- **V0.1 MVP** —— 提醒闭环 + 全屏 Overlay + Intent + SQLite。重点不是 AI，而是把基础闭环做正确
-- **V0.2 Context Awareness** —— 会议检测、Interruptibility、Reminder Fusion、Health Debt、Floating Reminder、最佳提醒时机
-- **V0.3 Learning** —— 用户习惯学习、分时段 / 分 App 策略、接受率与跳过模式
-- **V0.4 AI Agent** —— AI 日报周报、Agent Chat、解释决策、动态 Planner
-- **V1.0** —— macOS + Windows 双平台，完成 Sense → Context → Health → Plan → Intervention → Memory → Learning → AI 完整闭环
+> 2026-09-29 重排：在盖「上下文感知」「学习」这些楼层之前，先把地基补牢
+> （数据真、数据属于你、打扰有梯度）。详见文档中心的《版本路线图》v1.2。
+
+- **V0.1 Foundation** ✅ —— 提醒闭环 + 全屏 Overlay + Intent + SQLite。重点不是 AI，而是把基础闭环做正确
+- **V0.2 Groundwork 基础补全** —— 周统计、数据导出、事件保留策略、Reminder Fusion、升级提醒（永不锁屏）、首次启动引导、悬浮卡片
+- **V0.3 Context Awareness** —— 会议检测、Interruptibility、最佳提醒时机（原 V0.2）
+- **V0.4 Learning** —— 用户习惯学习、分时段 / 分 App 策略、完整统计页（原 V0.3）
+- **V0.5 AI Agent** —— AI 日报周报、Agent Chat、解释决策、动态 Planner（BYO-Key，完全可选）
+- **V0.6 Platform → V0.7 Hardening → V1.0** —— Windows 双平台、加固打磨、正式版
 
 ---
 
@@ -162,7 +166,7 @@ git config core.hooksPath .githooks
 ### 常用命令
 
 ```bash
-# 单元测试（382 个，另有 6 个文档测试）
+# 单元测试（395 个，另有 6 个文档测试）
 cargo test --workspace
 
 # 格式与静态检查
