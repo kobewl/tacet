@@ -402,8 +402,7 @@ impl AppState {
         while i >= 2 {
             let (started_at, started_kind) = boundaries[i - 2];
             let (paused_at, paused_kind) = boundaries[i - 1];
-            if started_kind != BehaviorKind::WorkStarted
-                || paused_kind != BehaviorKind::WorkPaused
+            if started_kind != BehaviorKind::WorkStarted || paused_kind != BehaviorKind::WorkPaused
             {
                 break;
             }
@@ -443,8 +442,7 @@ impl AppState {
     pub fn close_work_segment_on_exit(&mut self, now: Timestamp) {
         if let Some(change) = self.clock.handle(WorkInput::Sleep, now) {
             let payload = format!("{{\"from\":\"{}\"}}", change.from.as_str());
-            if let Err(err) = EventRepo::append(&self.db, BehaviorKind::WorkPaused, &payload, now)
-            {
+            if let Err(err) = EventRepo::append(&self.db, BehaviorKind::WorkPaused, &payload, now) {
                 crate::logging::warn(&format!("退出收尾写入失败（不阻断退出）：{err}"));
             }
         }
@@ -1670,8 +1668,7 @@ mod tests {
         let now = Timestamp::now();
 
         let crashed_start = now.saturating_sub_millis(30 * MINUTE);
-        EventRepo::append(&state.db, BehaviorKind::WorkStarted, "{}", crashed_start)
-            .expect("写入");
+        EventRepo::append(&state.db, BehaviorKind::WorkStarted, "{}", crashed_start).expect("写入");
 
         state.close_dangling_work_segment().expect("收尾");
 

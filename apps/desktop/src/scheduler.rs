@@ -455,9 +455,7 @@ fn work_summary_from_events(
                     let replace = match prev_boundary_at {
                         // 只有跨午夜带来的起点、不是真实事件 → 用新起点
                         None => true,
-                        Some(prev) => {
-                            event.occurred_at.millis_since(prev).max(0) > merge_gap_ms
-                        }
+                        Some(prev) => event.occurred_at.millis_since(prev).max(0) > merge_gap_ms,
                     };
                     if replace {
                         started_at = Some(event.occurred_at);
@@ -466,9 +464,7 @@ fn work_summary_from_events(
                     // 新的一段：看它是否接在上一块后面（≤ 阈值 = 同一口气，
                     // 块继续累计；否则上一块到此为止）
                     let continues = match last_stop {
-                        Some(stop) => {
-                            event.occurred_at.millis_since(stop).max(0) <= merge_gap_ms
-                        }
+                        Some(stop) => event.occurred_at.millis_since(stop).max(0) <= merge_gap_ms,
                         None => false,
                     };
                     if !continues {
@@ -502,9 +498,7 @@ fn work_summary_from_events(
         }
         if matches!(
             event.kind,
-            BehaviorKind::WorkStarted
-                | BehaviorKind::WorkPaused
-                | BehaviorKind::BreakStarted
+            BehaviorKind::WorkStarted | BehaviorKind::WorkPaused | BehaviorKind::BreakStarted
         ) {
             prev_boundary_at = Some(event.occurred_at);
         }
