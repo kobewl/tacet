@@ -95,7 +95,7 @@ pub struct ScreenInfo {
 /// 平台策略 §4.4 把它写成了隐私底线：任何需要「辅助功能 / 屏幕录制 / 麦克风录音」
 /// 级别权限的能力，默认答案都是「不做」。
 ///
-/// v0.2 才会用到它（会议概率）。v0.1 的实现可以直接返回 `Unsupported`。
+/// v0.3 才会用到它（会议概率）。v0.1 的实现可以直接返回 `Unsupported`。
 pub trait MeetingDetector: Send + Sync {
     /// 麦克风是否正被某个应用占用。
     fn is_microphone_in_use(&self) -> Result<bool>;

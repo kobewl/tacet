@@ -74,7 +74,7 @@ impl Capability {
     ///
     /// 用来区分「缺了会降级但能用」和「缺了整个闭环就断了」。
     /// v0.1 的必需项只有三个：空闲检测（计时准确性）、全屏检测（不打扰判断）、
-    /// 通知（Level 2 干预）。会议检测属于 v0.2，缺了完全不影响 v0.1。
+    /// 通知（Level 2 干预）。会议检测属于 v0.3，缺了完全不影响当前版本。
     pub const fn required_in_v01(self) -> bool {
         matches!(
             self,
@@ -171,14 +171,14 @@ mod tests {
 
     #[test]
     fn 会议检测缺失不影响基线达标() {
-        // 会议检测是 v0.2 的能力，v0.1 缺了完全不影响。
+        // 会议检测是 v0.3 的能力，当前版本缺了完全不影响。
         let mut report = CapabilityReport::empty();
         for capability in Capability::ALL {
             if capability != Capability::MeetingDetection {
                 report.mark_available(capability);
             }
         }
-        report.mark_unavailable(Capability::MeetingDetection, "v0.2 才实现");
+        report.mark_unavailable(Capability::MeetingDetection, "v0.3 才实现");
 
         assert!(report.meets_v01_requirements());
         assert!(!report.supports(Capability::MeetingDetection));

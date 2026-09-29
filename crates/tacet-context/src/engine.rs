@@ -94,7 +94,7 @@ impl ContextEngine {
             foreground_app: self.last_app.clone(),
             idle_seconds: self.last_idle_seconds,
             fullscreen: self.last_fullscreen,
-            // v0.2 之前这两项恒为 0：会议检测与专注度建模还没做。
+            // v0.3 之前这两项恒为 0：会议检测与专注度建模还没做。
             // 留着字段是为了让决策引擎的接口形状在这个版本就固定下来。
             meeting_probability: 0.0,
             focus_probability: 0.0,
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn 会议与专注概率在基线版本恒为零() {
-        // 这两个字段是给 v0.2 预留的，v0.1 必须保持为 0 ——
+        // 这两个字段是给 v0.3 预留的，v0.1 必须保持为 0 ——
         // 如果哪天有人填了假数据进来，决策引擎会基于虚构的信息做判断。
         let platform = MockPlatform::new();
         platform.control.set_microphone_in_use(true);

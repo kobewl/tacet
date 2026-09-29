@@ -35,9 +35,9 @@ use crate::path;
 /// | 版本 | 交付版本 | 内容 |
 /// | --- | --- | --- |
 /// | 1（S1） | v0.1 | `events` / `interventions` / `intents` / `settings` |
-/// | 2（S2） | v0.2 | `decisions` / `context_snapshots` / `user_corrections` |
-/// | 3（S3） | v0.3 | `user_model_stats` / `patterns` / `health_debt_snapshots` |
-/// | 4（S4） | v0.4 | `ai_reviews` / `chat_sessions` |
+/// | 2（S2） | v0.3 | `decisions` / `context_snapshots` / `user_corrections` |
+/// | 3（S3） | v0.4 | `user_model_stats` / `patterns` / `health_debt_snapshots` |
+/// | 4（S4） | v0.5 | `ai_reviews` / `chat_sessions` |
 pub const CURRENT_SCHEMA_VERSION: i64 = 1;
 
 /// 备份文件保留几份（数据模型 §4.1：保留最近 3 份）。
@@ -100,8 +100,8 @@ pub fn run(
 
     // 降级保护：库比程序新。
     //
-    // 用户可能装了 v0.3 又退回 v0.1。这时它的库里有 v0.1 不认识的表，
-    // 一旦让 v0.1 去写，就可能破坏 v0.3 的数据结构。
+    // 用户可能装了 v0.4 又退回 v0.1。这时它的库里有 v0.1 不认识的表，
+    // 一旦让 v0.1 去写，就可能破坏 v0.4 的数据结构。
     // 正确做法是**什么都不做**，明确告诉用户去升级程序。
     if current > target_version {
         return Err(StorageError::SchemaTooNew {

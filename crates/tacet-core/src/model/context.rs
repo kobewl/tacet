@@ -29,7 +29,7 @@ pub enum AppCategory {
     Editor,
     /// 浏览器。
     Browser,
-    /// 会议软件（v0.2 起配合会议概率使用）。
+    /// 会议软件（v0.3 起配合会议概率使用）。
     Meeting,
     /// 即时通讯 / 邮件。
     Communication,
@@ -84,7 +84,7 @@ impl AppCategory {
     /// 这类应用通常意味着「用户正专注，不宜强打断」。
     ///
     /// v0.1 只用它做一件事：决定全屏提醒要不要降级成通知。
-    /// v0.2 的 Interruptibility 五因子模型会把它变成一个连续权重。
+    /// v0.3 的 Interruptibility 五因子模型会把它变成一个连续权重。
     pub const fn implies_focus(self) -> bool {
         matches!(self, AppCategory::Editor | AppCategory::Terminal)
     }
@@ -137,7 +137,7 @@ pub struct ContextSnapshot {
     pub idle_seconds: u32,
     /// 前台应用是否处于全屏。
     pub fullscreen: bool,
-    /// 会议概率 0.0~1.0（v0.1 恒为 0：会议检测属于 v0.2）。
+    /// 会议概率 0.0~1.0（v0.1 恒为 0：会议检测属于 v0.3）。
     pub meeting_probability: f64,
     /// 专注概率 0.0~1.0（v0.1 恒为 0）。
     pub focus_probability: f64,

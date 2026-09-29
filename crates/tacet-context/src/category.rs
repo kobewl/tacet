@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn 会议与通讯应用被区分开() {
-        // 这两个类别在 v0.2 会有不同的处理：会议要降级干预，
+        // 这两个类别在 v0.3 会有不同的处理：会议要降级干预，
         // 通讯只是「可能不宜强打断」。现在分清楚，将来才不用改数据。
         assert_eq!(classify("us.zoom.xos", "zoom.us"), AppCategory::Meeting);
         assert_eq!(

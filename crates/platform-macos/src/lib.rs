@@ -9,7 +9,7 @@
 //! | [`IdleMonitor`] | 同上 | 无 |
 //! | [`WindowManager`] | AppKit `NSWorkspace` / `NSRunningApplication` | 无 |
 //! | [`ScreenManager`] | AppKit `NSScreen` | 无 |
-//! | [`MeetingDetector`] | CoreAudio 设备占用状态（v0.2） | 无 |
+//! | [`MeetingDetector`] | CoreAudio 设备占用状态（v0.3） | 无 |
 //! | [`NotificationService`] | 由壳层用 Tauri 通知插件实现 | 通知权限 |
 //! | [`StartupService`] | 由壳层写 LaunchAgent plist 实现（见 `startup.rs`） | 无 |
 //!
@@ -141,7 +141,7 @@ impl Platform for MacPlatform {
         //
         // 它们有个共同点 —— 都需要**应用身份**（bundle），而纯库 crate 没有。
         // 通知要 bundle identifier 才能申请权限；开机自启要 bundle 才能
-        // 在系统里登记登录项；会议检测则单纯是 v0.2 的范围。
+        // 在系统里登记登录项；会议检测则单纯是 v0.3 的范围。
         //
         // ## 为什么开机自启曾经标错（这里修过一次真实的错误）
         //
@@ -164,7 +164,7 @@ impl Platform for MacPlatform {
             Capability::StartupLaunch,
             "开机自启由应用壳层提供，状态存在系统的登录项里",
         );
-        report.mark_unavailable(Capability::MeetingDetection, "会议检测属于 v0.2 范围");
+        report.mark_unavailable(Capability::MeetingDetection, "会议检测属于 v0.3 范围");
 
         report
     }
@@ -180,7 +180,7 @@ impl Platform for MacPlatform {
 ///
 /// 平台策略 §4.4 说这项能力**不需要麦克风权限**（只查询
 /// `kAudioDevicePropertyDeviceIsRunningSomewhere` 这个设备属性，
-/// 不触碰任何音频流）。但那是 v0.2 的工作，v0.1 里它如实返回
+/// 不触碰任何音频流）。但那是 v0.3 的工作，v0.1 里它如实返回
 /// [`PlatformError::Unsupported`]。
 ///
 /// ## 为什么不如实实现「返回 false」而是返回错误
