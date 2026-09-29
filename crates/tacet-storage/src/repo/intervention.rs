@@ -288,6 +288,20 @@ impl InterventionRepo {
 
         rows.into_iter().map(decode_row).collect()
     }
+
+    /// 删除某个时刻之前发出的全部干预记录，返回删除的行数。
+    ///
+    /// 与 [`crate::repo::EventRepo::prune_before`] 同一套保留策略：
+    /// 接受率、跳过模式都是查询时现算的，过期原始记录删掉后，
+    /// 统计自然只反映保留期内的情况。走 `idx_interv_fired` 索引。
+    pub fn prune_before(db: &Database, cutoff: Timestamp) -> Result<usize> {
+        let conn = db.lock();
+        let deleted = conn.execute(
+            "DELETE FROM interventions WHERE fired_at < ?1",
+            params![cutoff.as_millis()],
+        )?;
+        Ok(deleted)
+    }
 }
 
 /// 把一行数据库记录解码成领域对象。
@@ -655,5 +669,37 @@ mod tests {
         assert_eq!(loaded.reasons[0], Reason::ContinuousWork { minutes: 78 });
         assert_eq!(loaded.reasons[2], Reason::DoNotDisturb);
         assert_eq!(loaded.why_lines().len(), 3);
+    }
+
+    /// 与 events 的保留策略同一契约：只删严格早于截止时刻的记录。
+    #[test]
+    fn 清理只删严格早于截止时刻的记录() {
+        let db = Database::open_in_memory().expect("打开");
+        let day = 86_400_000;
+
+        InterventionRepo::insert(&db, &record(InterventionLevel::FullScreen, t0())).expect("写入");
+        InterventionRepo::insert(
+            &db,
+            &record(
+                InterventionLevel::FullScreen,
+                t0().saturating_add_millis(day),
+            ),
+        )
+        .expect("写入");
+
+        let cutoff = t0().saturating_add_millis(day);
+        let deleted = InterventionRepo::prune_before(&db, cutoff).expect("清理");
+        assert_eq!(deleted, 1, "只删严格早于截止时刻的那条");
+
+        let kept = InterventionRepo::in_window(
+            &db,
+            &DateWindow {
+                start: t0(),
+                end: cutoff.saturating_add_millis(1),
+                day_index: 0,
+            },
+        )
+        .expect("读取");
+        assert_eq!(kept.len(), 1, "边界上那条必须留下");
     }
 }

@@ -77,6 +77,15 @@ pub fn default_database_path() -> Result<PathBuf> {
     Ok(default_data_dir()?.join(DATABASE_FILENAME))
 }
 
+/// 返回导出文件的默认目录：数据目录下的 `exports/`。
+///
+/// 放在数据目录**里面**而不是下载文件夹：导出是用户主动触发的动作，
+/// 命令执行完会在访达里打开这个文件夹 —— 位置可预期比「猜用户想放哪」
+/// 更符合 Local First 的脾气；想挪走，拖一下就行。
+pub fn default_exports_dir() -> Result<PathBuf> {
+    Ok(default_data_dir()?.join("exports"))
+}
+
 /// 确保数据目录存在（必要时创建）。
 pub fn ensure_data_dir(dir: &Path) -> Result<()> {
     if dir.exists() {

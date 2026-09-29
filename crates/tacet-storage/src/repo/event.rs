@@ -194,6 +194,29 @@ impl EventRepo {
         Ok(count.max(0) as u32)
     }
 
+    /// 删除某个时刻之前的全部原始事件，返回删除的行数。
+    ///
+    /// ## 为什么需要保留策略
+    ///
+    /// `events` 表是「只进不出」的设计：没有删除入口，用得越久表越大。
+    /// 单条事件很小、每天也只有几十条，一年不过几 MB —— 这不是燃眉问题，
+    /// 但一个宣称「经得起长期使用」的工具应该自带卫生习惯，而不是把
+    /// 「哪天要手动清库」留给用户。
+    ///
+    /// 删的是**原始事件**；由它们聚合出来的结论（今日统计、接受率）都是
+    /// 查询时现算的，所以过期数据删掉后统计自然就只反映保留期内的情况 ——
+    /// 这正是「保留 365 天」的语义，不需要任何额外的聚合表。
+    ///
+    /// 走 `idx_events_time` 索引，删除是毫秒级操作，适合启动时静默执行。
+    pub fn prune_before(db: &Database, cutoff: Timestamp) -> Result<usize> {
+        let conn = db.lock();
+        let deleted = conn.execute(
+            "DELETE FROM events WHERE occurred_at < ?1",
+            params![cutoff.as_millis()],
+        )?;
+        Ok(deleted)
+    }
+
     /// 按**发生顺序**读取休息的生命周期事件（开始 / 完成 / 跳过）。
     ///
     /// ## 为什么按 id 排序而不是按时间
@@ -496,6 +519,38 @@ mod tests {
         EventRepo::append(&db, BehaviorKind::BreakCompleted, "{}", t0()).expect("写入");
 
         assert_eq!(EventRepo::count_all(&db).expect("统计"), 2);
+    }
+
+    /// 保留策略是「严格早于截止时刻的才删」：边界上那条必须留下。
+    /// 删多了等于篡改历史，宁可少删一条。
+    #[test]
+    fn 清理只删严格早于截止时刻的事件() {
+        let db = Database::open_in_memory().expect("打开");
+        let day = 86_400_000;
+
+        EventRepo::append(&db, BehaviorKind::WaterLogged, "{}", t0()).expect("写入");
+        EventRepo::append(
+            &db,
+            BehaviorKind::ActivityLogged,
+            "{}",
+            t0().saturating_add_millis(day),
+        )
+        .expect("写入");
+
+        // 截止时刻恰好压在第二条上：它必须留下
+        let cutoff = t0().saturating_add_millis(day);
+        let deleted = EventRepo::prune_before(&db, cutoff).expect("清理");
+        assert_eq!(deleted, 1, "只删严格早于截止时刻的那条");
+        assert_eq!(EventRepo::count_all(&db).expect("统计"), 1);
+
+        // 再往后推一毫秒，它也该走了
+        let deleted = EventRepo::prune_before(&db, cutoff.saturating_add_millis(1)).expect("清理");
+        assert_eq!(deleted, 1);
+        assert_eq!(EventRepo::count_all(&db).expect("统计"), 0);
+
+        // 空表上再清理是空操作，不报错
+        let deleted = EventRepo::prune_before(&db, cutoff).expect("清理");
+        assert_eq!(deleted, 0);
     }
 
     // ======================================================== 休息生命周期

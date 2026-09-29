@@ -50,6 +50,7 @@
 pub mod datewin;
 pub mod db;
 pub mod error;
+pub mod export;
 pub mod migration;
 pub mod path;
 pub mod repo;
@@ -61,3 +62,17 @@ pub use migration::CURRENT_SCHEMA_VERSION;
 pub use repo::{
     EventRepo, EventRow, IntentRepo, InterventionRepo, InterventionStats, SettingsRepo,
 };
+
+/// 原始记录（`events` / `interventions`）的保留天数。
+///
+/// ## 为什么是 365 天，而不是「永不删除」或「90 天」
+///
+/// 一天只有几十条原始事件，一年下来不过几 MB —— 这不是存储危机，
+/// 而是卫生习惯：一个常驻工具不应该默认「表会无限长大」。
+/// 选一年是因为周统计、趋势这类功能看的是近期节奏，
+/// 一年前的逐条记录对任何现有功能都没有意义；
+/// 真要长期留存的是导出出去的 CSV 和用户的设置（`settings` 表不受保留策略影响）。
+///
+/// 统计都是查询时现算的，所以过期记录删除后，
+/// 统计自然只反映保留期内的情况 —— 不需要任何聚合表来「补」。
+pub const RETENTION_DAYS: i64 = 365;

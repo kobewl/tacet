@@ -116,10 +116,37 @@ pub struct AppState {
     pub last_return_at: Option<Timestamp>,
 }
 
+/// 启动时清理超过保留期的原始记录（见 `tacet_storage::RETENTION_DAYS`）。
+///
+/// 失败只记日志、不阻断启动：保留策略是卫生习惯，不是功能前提 ——
+/// 因为例行清理失败而让用户打不开应用，是本末倒置。
+/// 只在真实数据库的启动路径上调用；内存库（测试）不需要。
+fn prune_expired_records(db: &Database) {
+    let retention_ms = tacet_storage::RETENTION_DAYS * 24 * 60 * MINUTE;
+    let cutoff = Timestamp::now().saturating_sub_millis(retention_ms);
+
+    let events = EventRepo::prune_before(db, cutoff);
+    let interventions = InterventionRepo::prune_before(db, cutoff);
+
+    match (events, interventions) {
+        (Ok(e), Ok(i)) if e + i > 0 => {
+            crate::logging::info(&format!(
+                "保留策略：清理了 {e} 条行为事件、{i} 条干预记录（{} 天前）",
+                tacet_storage::RETENTION_DAYS
+            ));
+        }
+        (Err(err), _) | (_, Err(err)) => {
+            crate::logging::warn(&format!("保留策略清理失败（不影响使用）：{err}"));
+        }
+        _ => {}
+    }
+}
+
 impl AppState {
     /// 建立应用状态：打开数据库、读取设置、初始化各引擎。
     pub fn new(platform: Box<dyn Platform>) -> Result<Self, StateError> {
         let db = Database::open_default()?;
+        prune_expired_records(&db);
         let prefs = SettingsRepo::load_preferences(&db)?;
 
         let now = Timestamp::now();
