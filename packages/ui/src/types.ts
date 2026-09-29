@@ -58,9 +58,9 @@ export interface HealthNeeds {
 
 /** 今日统计。所有日期边界都在 Rust 侧算好（数据模型 §8 的约束）。 */
 export interface TodaySummary {
-  /** 累计工作时长（分钟）。 */
+  /** 累计工作时长（分钟）：当天各段工作时间之和，空闲超阈值会断开成两段。 */
   workMinutes: number;
-  /** 最长连续工作（分钟）。 */
+  /** 最长连续工作（分钟）：当天最长的一段，与累计工作是两个不同的口径。 */
   longestStreakMinutes: number;
   /** 喝水次数。 */
   waterCount: number;
