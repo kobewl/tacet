@@ -210,6 +210,24 @@ impl WorkClock {
         self.accumulated_ms
     }
 
+    /// 重启后把上一段连续工作接回来（仅「重启恢复」场景使用）。
+    ///
+    /// 这枚秒表住在内存里，应用重启就清零；但重启前干了多久，
+    /// 数据库里的 `work.started` / `work.paused` 配对记得清清楚楚。
+    /// 调用方在「重启后第一次开始工作」时把查到的上一段时长传进来，
+    /// 计时就在旧时长的基础上继续 —— 重启本身不是休息，
+    /// 不该把用户已经连续工作的时间一笔勾销。
+    ///
+    /// 重启的空档（应用关闭的那几分钟）**不计入**：那段里用户在不在
+    /// 工作无从得知，只接回有据可查的部分。
+    /// 调用时机要求秒表已处于 [`WorkState::Working`]（刚完成切换），
+    /// 其余状态下调用是空操作。
+    pub fn attach_prior_continuous_ms(&mut self, prior_ms: i64) {
+        if self.state == WorkState::Working {
+            self.accumulated_ms += prior_ms.max(0);
+        }
+    }
+
     /// 取一份完整快照。
     pub fn snapshot(&self, now: Timestamp) -> WorkClockSnapshot {
         WorkClockSnapshot {
@@ -405,6 +423,37 @@ mod tests {
             "应累计约 10 分钟，实际 {} ms",
             c.continuous_work_ms()
         );
+    }
+
+    #[test]
+    fn 重启接上把上一段时长加回累计() {
+        let mut c = clock();
+        let mut now = t0();
+
+        let change = c.handle(WorkInput::Observe { idle_seconds: 0 }, now);
+        assert_eq!(change.map(|c| c.to), Some(WorkState::Working));
+
+        // 重启前已经干了 1 小时（数据库里有据可查的部分）
+        c.attach_prior_continuous_ms(60 * MINUTE);
+        assert_eq!(c.continuous_work_ms(), 60 * MINUTE);
+
+        // 继续工作 10 分钟，在 1 小时的基础上接着涨
+        for _ in 0..60 {
+            now = now.saturating_add_millis(10_000);
+            c.handle(WorkInput::Observe { idle_seconds: 0 }, now);
+        }
+        assert!(
+            (c.continuous_work_ms() - 70 * MINUTE).abs() <= 1,
+            "应为约 70 分钟，实际 {} ms",
+            c.continuous_work_ms()
+        );
+    }
+
+    #[test]
+    fn 重启接上只在工作状态下生效() {
+        let mut c = clock();
+        c.attach_prior_continuous_ms(60 * MINUTE);
+        assert_eq!(c.continuous_work_ms(), 0, "还没开始工作就不该有累计");
     }
 
     #[test]

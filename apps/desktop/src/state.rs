@@ -111,9 +111,25 @@ pub struct AppState {
     ///
     /// 它只影响「此刻该不该提醒」这一个判断，属于运行时状态，
     /// 不是用户行为的历史事实（历史事实由 `events` 表记录）。
-    /// 应用重启后这个值会丢，但重启后 `continuous_work_minutes` 也是 0
-    /// —— 同样是「从头开始算」，两者一致，不会产生矛盾。
+    /// 应用重启后这个值会丢。连续工作时长同样是内存态，但重启后会
+    /// 从数据库把上一段**接回来**（见 `work_resume_attempted`）——
+    /// 两者并不矛盾：一个答「距上次休息过了多久」，一个答「这口气
+    /// 连续干了多久」，后者是用户真实经历过的历史，有据可查就该接上。
     pub last_return_at: Option<Timestamp>,
+
+    /// 「多久没输入算离开」的阈值（毫秒）。
+    ///
+    /// 重启接上一段连续工作时拿它当界线：上一段的收尾时刻离现在
+    /// 不超过它，才认为重启前后是同一口气。与计时器内部用的
+    /// 界线保持同源，用户改设置两边一起变。
+    pub(crate) idle_threshold_ms: i64,
+
+    /// 重启后的第一次「开始工作」是否已经尝试过接上上一段。
+    ///
+    /// 接上只该发生一次：之后的每次离开回来，时长都在内存里没丢，
+    /// 走计时器自己的积压逻辑就好。不设标记的话，手动暂停恢复、
+    /// 短暂离开回来都会把上一段重复加一遍。
+    work_resume_attempted: bool,
 }
 
 /// 启动时清理超过保留期的原始记录（见 `tacet_storage::RETENTION_DAYS`）。
@@ -170,9 +186,12 @@ impl AppState {
             snooze_until: None,
             paused: false,
             last_return_at: None,
+            idle_threshold_ms,
+            work_resume_attempted: false,
         };
 
         state.close_dangling_break(now)?;
+        state.close_dangling_work_segment()?;
         Ok(state)
     }
 
@@ -287,6 +306,150 @@ impl AppState {
         Ok(())
     }
 
+    /// 收尾上一次运行留下的「未闭合的工作段」。
+    ///
+    /// 正常退出（菜单退出、升级重启）会走 [`Self::close_work_segment_on_exit`]
+    /// 把正在进行的段记上终点；崩溃、强杀来不及收尾，库里就会留下一条
+    /// 永远等不到配对的 `work.started`。
+    ///
+    /// 不处理的话，本次运行的第一条 `work.started` 会让今日统计把那条
+    /// 悬空的旧起点整个覆盖掉 —— 重启前那段真实的工作时间就这么蒸发了
+    /// （0.2.0 及之前一直如此，用户看到的就是「重启后统计重新开始」）。
+    ///
+    /// ## 为什么补在「开始」那条自身上，而不是补在现在
+    ///
+    /// 真实的结束时刻无从得知（应用死了没人记录）。补在现在是编造 ——
+    /// 应用关闭期间用户可能早就离开了；补在起点上等于如实承认
+    /// 「这一段有多长我们不知道，先按 0 记」。宁可少算，不编数据。
+    fn close_dangling_work_segment(&self) -> Result<(), StateError> {
+        let last_started = EventRepo::recent_of_kind(&self.db, BehaviorKind::WorkStarted, 1)?
+            .into_iter()
+            .next();
+        let last_paused = EventRepo::recent_of_kind(&self.db, BehaviorKind::WorkPaused, 1)?
+            .into_iter()
+            .next();
+
+        // 最近一条 started 比最近一条 paused 更晚（或者根本没有 paused）：
+        // 上一段工作没等到收尾就没了。
+        let dangling = match (last_started, last_paused) {
+            (Some(started), Some(paused)) if started.occurred_at > paused.occurred_at => {
+                Some(started)
+            }
+            (Some(started), None) => Some(started),
+            _ => None,
+        };
+        let Some(started) = dangling else {
+            return Ok(());
+        };
+
+        crate::logging::info(&format!(
+            "启动收尾：上一次运行留下未闭合的工作段（开始于 {}），结束时刻无从得知，按 0 时长封口",
+            started.occurred_at.as_millis()
+        ));
+        EventRepo::append(
+            &self.db,
+            BehaviorKind::WorkPaused,
+            "{\"from\":\"working\",\"backfilled\":true}",
+            started.occurred_at,
+        )?;
+        Ok(())
+    }
+
+    /// 从数据库里把「上一次运行结束时的连续工作时长」算出来。
+    ///
+    /// 做法：把最近的工作边界事件（`work.started` / `work.paused` /
+    /// `break.started`）合并按时间排序，从最后往前配对。启动时的
+    /// [`Self::close_dangling_work_segment`] 保证了尾部一定以
+    /// `work.paused` 结束，它与它前面相邻的 `work.started` 构成
+    /// 最后一段；再往前，只要相邻两段之间的空档不超过空闲阈值，
+    /// 就还属于同一口气 —— 继续加。显式的休息是用户主动打断，
+    /// 链条到此为止。
+    ///
+    /// 返回 0 表示没有可接的段：第一次启动、离开太久、中间休息过。
+    fn resume_prior_work_ms(&self, now: Timestamp) -> Result<i64, StateError> {
+        const RECENT_LIMIT: u32 = 100;
+        let mut boundaries: Vec<(Timestamp, BehaviorKind)> = Vec::new();
+        for kind in [
+            BehaviorKind::WorkStarted,
+            BehaviorKind::WorkPaused,
+            BehaviorKind::BreakStarted,
+        ] {
+            boundaries.extend(
+                EventRepo::recent_of_kind(&self.db, kind, RECENT_LIMIT)?
+                    .into_iter()
+                    .map(|row| (row.occurred_at, row.kind)),
+            );
+        }
+        boundaries.sort_by_key(|(at, _)| *at);
+
+        // 尾部必须以 paused 结束 —— 启动收尾保证了这一点。
+        // 万一不是（防御异常数据），宁可不接。
+        if boundaries.last().map(|(_, kind)| *kind) != Some(BehaviorKind::WorkPaused) {
+            return Ok(0);
+        }
+
+        // 第一道门：上一段的收尾离现在不能太久。超过空闲阈值，
+        // 说明用户在应用关闭期间（或回来之后）已经离开过，
+        // 重启前后不是同一口气 —— 接上等于编造数据。
+        let last_paused_at = boundaries.last().expect("刚检查过非空").0;
+        if now.millis_since(last_paused_at).max(0) > self.idle_threshold_ms {
+            return Ok(0);
+        }
+
+        // 从后往前，每次消费一对相邻的 (started, paused)。
+        let mut chain_ms: i64 = 0;
+        let mut i = boundaries.len();
+        while i >= 2 {
+            let (started_at, started_kind) = boundaries[i - 2];
+            let (paused_at, paused_kind) = boundaries[i - 1];
+            if started_kind != BehaviorKind::WorkStarted
+                || paused_kind != BehaviorKind::WorkPaused
+            {
+                break;
+            }
+            chain_ms += paused_at.millis_since(started_at).max(0);
+
+            // 再往前一段：中间没有显式休息、空档不超过阈值，才继续连
+            if i >= 4 {
+                let no_break = boundaries[i - 4..i]
+                    .iter()
+                    .all(|(_, kind)| !matches!(kind, BehaviorKind::BreakStarted));
+                let (_, prev_started_kind) = boundaries[i - 4];
+                let (prev_paused_at, prev_paused_kind) = boundaries[i - 3];
+                if no_break
+                    && prev_started_kind == BehaviorKind::WorkStarted
+                    && prev_paused_kind == BehaviorKind::WorkPaused
+                    && started_at.millis_since(prev_paused_at) <= self.idle_threshold_ms
+                {
+                    i -= 2;
+                    continue;
+                }
+            }
+            break;
+        }
+        Ok(chain_ms)
+    }
+
+    /// 退出前把还在进行的工作段记上终点。
+    ///
+    /// 秒表是内存里的，进程一死就没了；但这一段干了多久是用户真实
+    /// 经历过的事实，补一条 `work.paused`，今日统计才不会把这段
+    /// 蒸发掉，重启后的「接上」也才有据可查。
+    ///
+    /// 通过 `WorkInput::Sleep` 走状态机而不是直接写事件：重复调用时
+    /// （菜单退出先调一次、`ExitRequested` 又调一次），第二次状态
+    /// 不变、不会重复落库。崩溃和强杀来不及走到这里 —— 那留给
+    /// 启动时的 [`Self::close_dangling_work_segment`] 按未知时长封口。
+    pub fn close_work_segment_on_exit(&mut self, now: Timestamp) {
+        if let Some(change) = self.clock.handle(WorkInput::Sleep, now) {
+            let payload = format!("{{\"from\":\"{}\"}}", change.from.as_str());
+            if let Err(err) = EventRepo::append(&self.db, BehaviorKind::WorkPaused, &payload, now)
+            {
+                crate::logging::warn(&format!("退出收尾写入失败（不阻断退出）：{err}"));
+            }
+        }
+    }
+
     /// 供测试使用：用内存数据库建一个干净的状态。
     #[cfg(test)]
     pub fn in_memory(platform: Box<dyn Platform>) -> Result<Self, StateError> {
@@ -311,6 +474,8 @@ impl AppState {
             snooze_until: None,
             paused: false,
             last_return_at: None,
+            idle_threshold_ms: 5 * MINUTE,
+            work_resume_attempted: false,
         })
     }
 
@@ -452,6 +617,34 @@ impl AppState {
                 "用户回到电脑前（从 {}），休息类需求的计时从此刻重新起算",
                 from.as_str()
             ));
+        }
+
+        // 重启后的第一次「开始工作」：把上一段连续工作接回来。
+        //
+        // 秒表在重启时清零了，但上一段在库里有据可查。若上一段的
+        // 收尾时刻离现在不远（同一条「多久算离开」的界线），就把
+        // 上一段的时长加回来继续计 —— 重启本身不是休息，提醒排期
+        // 也不该因此被推倒重来。空档（应用关闭的那几分钟）不计入。
+        // 必须在下面写入本次 `work.started` **之前**查询，
+        // 否则查到的是自己，接上的就是空气。
+        if to == WorkState::Working
+            && matches!(from, WorkState::Idle | WorkState::Away)
+            && !self.work_resume_attempted
+        {
+            self.work_resume_attempted = true;
+            match self.resume_prior_work_ms(now) {
+                Ok(prior) if prior > 0 => {
+                    self.clock.attach_prior_continuous_ms(prior);
+                    crate::logging::info(&format!(
+                        "重启接上：上一段 {} 分钟的连续工作接了回来（重启空档不计入）",
+                        prior / MINUTE
+                    ));
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    crate::logging::warn(&format!("重启接上查询失败（不影响使用）：{err}"));
+                }
+            }
         }
 
         // 只有「开始工作」和「停止工作」两件事值得记。
@@ -1380,6 +1573,154 @@ mod tests {
             EventRepo::last_occurrence(&state.db, BehaviorKind::WorkPaused).expect("查询"),
             Some(away),
             "离开也必须落库 —— 最长连续工作是靠 started/paused 配对算出来的"
+        );
+    }
+
+    /// 重启接上的核心场景：升级重启（正常收尾）后回来接着干活，
+    /// 上一段时长要接回来继续计，重启的空档不计入；
+    /// 之后的离开回来走积压逻辑，不得把上一段再加一遍。
+    #[test]
+    fn 重启后第一次开始工作会接上上一段() {
+        use std::sync::Arc;
+
+        let platform = MockPlatform::new();
+        let control = Arc::clone(&platform.control);
+        let mut state = AppState::in_memory(Box::new(platform)).expect("建立状态");
+        let now = Timestamp::now();
+
+        // 上一段：1 小时前开始、2 分钟前正常收尾（升级重启的现场）
+        EventRepo::append(
+            &state.db,
+            BehaviorKind::WorkStarted,
+            "{}",
+            now.saturating_sub_millis(60 * MINUTE),
+        )
+        .expect("写入");
+        EventRepo::append(
+            &state.db,
+            BehaviorKind::WorkPaused,
+            "{}",
+            now.saturating_sub_millis(2 * MINUTE),
+        )
+        .expect("写入");
+
+        // 重启后第一次 tick：Idle → Working，上一段被接回来
+        state.tick(now).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working);
+        let resumed = state.continuous_work_minutes();
+        assert!(
+            resumed >= 58,
+            "上一段 58 分钟应被接回（空档 2 分钟不计），实际 {resumed} 分钟"
+        );
+
+        // 之后的离开 → 回来：走积压逻辑，不得重复接
+        control.set_idle_seconds(10 * 60);
+        state
+            .tick(now.saturating_add_millis(11 * MINUTE))
+            .expect("tick");
+        assert_eq!(state.work_state(), WorkState::Away);
+        control.set_idle_seconds(0);
+        state
+            .tick(now.saturating_add_millis(12 * MINUTE))
+            .expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working);
+        assert!(
+            state.continuous_work_minutes() < resumed,
+            "回来后重新计时不该再带上一段"
+        );
+    }
+
+    /// 上一段的收尾离现在太远（超过空闲阈值）：中间明显离开过，
+    /// 接上等于编造数据 —— 从零开始。
+    #[test]
+    fn 重启离上一次收尾太久就不接上一段() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        EventRepo::append(
+            &state.db,
+            BehaviorKind::WorkStarted,
+            "{}",
+            now.saturating_sub_millis(200 * MINUTE),
+        )
+        .expect("写入");
+        EventRepo::append(
+            &state.db,
+            BehaviorKind::WorkPaused,
+            "{}",
+            now.saturating_sub_millis(180 * MINUTE),
+        )
+        .expect("写入");
+
+        state.tick(now).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working);
+        assert_eq!(
+            state.continuous_work_minutes(),
+            0,
+            "离开远超阈值：上一段不该被接回来"
+        );
+    }
+
+    /// 崩溃 / 强杀留下的悬空 `work.started`，启动时按 0 时长封口：
+    /// 结束时刻补在起点自身上。不封口的话，本次运行的第一条
+    /// started 会把它覆盖掉，那段真实工作时间就蒸发了。
+    #[test]
+    fn 启动收尾给悬空的工作段按零时长封口() {
+        let state = state();
+        let now = Timestamp::now();
+
+        let crashed_start = now.saturating_sub_millis(30 * MINUTE);
+        EventRepo::append(&state.db, BehaviorKind::WorkStarted, "{}", crashed_start)
+            .expect("写入");
+
+        state.close_dangling_work_segment().expect("收尾");
+
+        let paused = EventRepo::recent_of_kind(&state.db, BehaviorKind::WorkPaused, 1)
+            .expect("查询")
+            .into_iter()
+            .next()
+            .expect("悬空段应有收尾记录");
+        assert_eq!(
+            paused.occurred_at, crashed_start,
+            "结束时刻补在起点上：时长按 0 记，不编造"
+        );
+
+        // 已闭合后再次收尾：无事发生
+        state.close_dangling_work_segment().expect("再次收尾");
+        assert_eq!(
+            EventRepo::recent_of_kind(&state.db, BehaviorKind::WorkPaused, 10)
+                .expect("查询")
+                .len(),
+            1,
+            "重复收尾不得写出第二条记录"
+        );
+    }
+
+    /// 正常退出（菜单退出、升级重启）走到的收尾：进行中的段在退出
+    /// 时刻记上终点；重复调用（ExitRequested 里还有一道）不重复落库。
+    #[test]
+    fn 退出收尾把进行中的工作段记上终点且不重复() {
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.tick(now).expect("tick");
+        assert_eq!(state.work_state(), WorkState::Working);
+
+        let exit_at = now.saturating_add_millis(25 * MINUTE);
+        state.close_work_segment_on_exit(exit_at);
+        assert_eq!(
+            EventRepo::last_occurrence(&state.db, BehaviorKind::WorkPaused).expect("查询"),
+            Some(exit_at),
+            "退出时刻就是这一段的终点"
+        );
+
+        state.close_work_segment_on_exit(exit_at);
+        assert_eq!(
+            EventRepo::recent_of_kind(&state.db, BehaviorKind::WorkPaused, 10)
+                .expect("查询")
+                .len(),
+            1,
+            "重复收尾不得写出两条记录"
         );
     }
 

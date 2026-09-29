@@ -206,10 +206,17 @@ export function Panel() {
       ? { label: "休息中", value: "—" }
       : state === "away"
         ? { label: "已暂停", value: "—" }
-        : {
-            label: "连续工作",
-            value: formatDurationShort(continuousWorkMinutes),
-          };
+        : state === "idle"
+          ? { label: "连续工作", value: "—" }
+          : {
+              label: "连续工作",
+              // 刚重启 / 刚回来还不到 1 分钟：说「刚开始」比
+              // 「不到 1 分钟」更像人话
+              value:
+                continuousWorkMinutes < 1
+                  ? "刚开始"
+                  : formatDurationShort(continuousWorkMinutes),
+            };
 
   return (
     <div className="panel panel-shell" ref={shellRef}>

@@ -42,10 +42,11 @@
 //! 这条顺序是 `App::restart()` 的实现细节，不是文档承诺 ——
 //! 所以升级 Tauri 大版本时，**这一条要重新验证**。
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::commands::CmdResult;
+use crate::windows;
 
 /// 检查更新时，把新版本信息交给界面的载荷。
 ///
@@ -186,6 +187,15 @@ pub async fn install_update(app: AppHandle) -> CmdResult<()> {
     match result {
         Ok(()) => {
             crate::logging::info(&format!("更新 v{version} 安装完成，即将重启"));
+            // 重启前把还在计的工作段收尾 —— 升级重启不是休息，
+            // 重启后统计和「接上」都靠这条记录。restart() 的退出
+            // 路径不保证经过 ExitRequested，所以这里要单独挂一道；
+            // 与退出路径上的其他收尾重复调用是安全的（状态不变就
+            // 不会重复落库）。
+            if let Some(shared) = app.try_state::<windows::SharedState>() {
+                crate::state::AppState::lock(&shared)
+                    .close_work_segment_on_exit(tacet_core::Timestamp::now());
+            }
             // 重启：新进程起来时会连上单实例的 socket 检查 ——
             // 旧进程的 socket 由插件在 RunEvent::Exit 时清掉，顺序见模块头部说明。
             app.restart();

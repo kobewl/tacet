@@ -347,6 +347,7 @@ pub(crate) fn build_week_summary(state: &AppState, now: Timestamp) -> serde_json
             now,
             carried,
             working_now && index == days.len() - 1,
+            state.idle_threshold_ms,
         );
 
         let count = |kind: BehaviorKind| {
@@ -416,6 +417,7 @@ fn compute_work_summary(
         now,
         carried,
         state.clock.state() == tacet_core::state::WorkState::Working,
+        state.idle_threshold_ms,
     )
 }
 
@@ -425,40 +427,98 @@ fn work_summary_from_events(
     now: Timestamp,
     carried: bool,
     working_now: bool,
+    merge_gap_ms: i64,
 ) -> WorkSummary {
     use tacet_core::model::BehaviorKind;
 
     let end = now.min(today.end);
     let mut total_ms: i64 = 0;
     let mut longest_ms: i64 = 0;
+    // 当前连续块：一口气里的多段工作之和（段间空档不计入）。
+    // 块结束（隔太久 / 显式休息 / 事件耗尽）时才把整块计入 longest。
+    let mut block_ms: i64 = 0;
     let mut started_at = carried.then_some(today.start);
-
-    let mut finish = |start: Timestamp, stop: Timestamp| {
-        let span = stop.min(end).millis_since(start.max(today.start)).max(0);
-        total_ms += span;
-        longest_ms = longest_ms.max(span);
-    };
+    // 最近一次工作收尾的时刻：判断下一段是否接在上一块后面用
+    let mut last_stop: Option<Timestamp> = None;
+    // 最近一条工作边界事件的时刻：识别历史遗留的连续 started 用
+    let mut prev_boundary_at: Option<Timestamp> = None;
 
     for event in events {
         match event.kind {
             BehaviorKind::WorkStarted => {
-                started_at = Some(event.occurred_at);
+                if started_at.is_some() {
+                    // 正常流程里两条 started 之间必有 paused；连续出现
+                    // 只会来自旧版本的「退出不收尾」。靠得近（≤ 阈值）
+                    // 是重启衔接，保留更早的起点 —— 那几分钟空档用户
+                    // 几乎肯定在干活，把整段丢掉才是大错；隔得远说明
+                    // 中间是漫长的离开，用新起点（旧起点按丢弃处理）。
+                    let replace = match prev_boundary_at {
+                        // 只有跨午夜带来的起点、不是真实事件 → 用新起点
+                        None => true,
+                        Some(prev) => {
+                            event.occurred_at.millis_since(prev).max(0) > merge_gap_ms
+                        }
+                    };
+                    if replace {
+                        started_at = Some(event.occurred_at);
+                    }
+                } else {
+                    // 新的一段：看它是否接在上一块后面（≤ 阈值 = 同一口气，
+                    // 块继续累计；否则上一块到此为止）
+                    let continues = match last_stop {
+                        Some(stop) => {
+                            event.occurred_at.millis_since(stop).max(0) <= merge_gap_ms
+                        }
+                        None => false,
+                    };
+                    if !continues {
+                        longest_ms = longest_ms.max(block_ms);
+                        block_ms = 0;
+                    }
+                    started_at = Some(event.occurred_at);
+                }
             }
             BehaviorKind::WorkPaused | BehaviorKind::BreakStarted => {
                 if let Some(start) = started_at.take() {
-                    finish(start, event.occurred_at);
+                    let span = event
+                        .occurred_at
+                        .min(end)
+                        .millis_since(start.max(today.start))
+                        .max(0);
+                    total_ms += span;
+                    block_ms += span;
+                }
+                if event.kind == BehaviorKind::BreakStarted {
+                    // 显式休息是用户主动打断：块到此为止，休息后的
+                    // 工作不再与之前的段相接
+                    longest_ms = longest_ms.max(block_ms);
+                    block_ms = 0;
+                    last_stop = None;
+                } else {
+                    last_stop = Some(event.occurred_at);
                 }
             }
             _ => {}
+        }
+        if matches!(
+            event.kind,
+            BehaviorKind::WorkStarted
+                | BehaviorKind::WorkPaused
+                | BehaviorKind::BreakStarted
+        ) {
+            prev_boundary_at = Some(event.occurred_at);
         }
     }
 
     // 只有当前状态仍在工作，才把未闭合的一段计到此刻；崩溃遗留的开始事件不续算。
     if working_now {
         if let Some(start) = started_at {
-            finish(start, end);
+            let span = end.millis_since(start.max(today.start)).max(0);
+            total_ms += span;
+            block_ms += span;
         }
     }
+    longest_ms = longest_ms.max(block_ms);
 
     WorkSummary {
         total_minutes: (total_ms / tacet_core::time::MINUTE) as u32,
@@ -533,6 +593,9 @@ mod tests {
         AppState::in_memory(Box::new(MockPlatform::new())).expect("建立状态")
     }
 
+    /// 测试用的「同一口气」界线：5 分钟（与默认空闲阈值一致）。
+    const MERGE_GAP_MS: i64 = 5 * 60_000;
+
     fn event(kind: BehaviorKind, at: Timestamp) -> EventRow {
         EventRow {
             id: 0,
@@ -555,7 +618,7 @@ mod tests {
         ];
 
         assert_eq!(
-            work_summary_from_events(&events, &today, at(80), false, false),
+            work_summary_from_events(&events, &today, at(80), false, false, MERGE_GAP_MS),
             WorkSummary {
                 total_minutes: 50,
                 longest_minutes: 30,
@@ -573,19 +636,130 @@ mod tests {
         ];
 
         assert_eq!(
-            work_summary_from_events(&events, &today, at(140), true, true),
+            work_summary_from_events(&events, &today, at(140), true, true, MERGE_GAP_MS),
             WorkSummary {
                 total_minutes: 110,
                 longest_minutes: 90,
             }
         );
         assert_eq!(
-            work_summary_from_events(&events, &today, at(140), true, false),
+            work_summary_from_events(&events, &today, at(140), true, false, MERGE_GAP_MS),
             WorkSummary {
                 total_minutes: 90,
                 longest_minutes: 90,
             },
             "应用重启后留下的未闭合记录不应一直算到现在"
+        );
+    }
+
+    /// 重启衔接的两段（收尾到重新开始 ≤ 空闲阈值）在统计里是一口气：
+    /// 累计和最长连续都把两段加起来，重启的空档不计入 ——
+    /// 否则「今天」页会与面板上接回来的计时对不上。
+    #[test]
+    fn 重启衔接的两段合并成一块且空档不计入() {
+        let today = DateWindow::day_of(Timestamp::from_millis(0), LocalOffset::utc());
+        let at = |minutes: i64| today.start.saturating_add_millis(minutes * 60_000);
+        // 工作 30 分钟 → 重启（空档 5 分钟，恰好压着界线）→ 再工作 35 分钟
+        let events = vec![
+            event(BehaviorKind::WorkStarted, at(10)),
+            event(BehaviorKind::WorkPaused, at(40)),
+            event(BehaviorKind::WorkStarted, at(45)),
+            event(BehaviorKind::WorkPaused, at(80)),
+        ];
+
+        assert_eq!(
+            work_summary_from_events(&events, &today, at(80), false, false, MERGE_GAP_MS),
+            WorkSummary {
+                total_minutes: 65,
+                longest_minutes: 65,
+            }
+        );
+    }
+
+    /// 空档超过阈值就不是同一口气了：各算各的段，空档两头都不沾。
+    #[test]
+    fn 隔太久的两段不合并() {
+        let today = DateWindow::day_of(Timestamp::from_millis(0), LocalOffset::utc());
+        let at = |minutes: i64| today.start.saturating_add_millis(minutes * 60_000);
+        let events = vec![
+            event(BehaviorKind::WorkStarted, at(10)),
+            event(BehaviorKind::WorkPaused, at(40)),
+            event(BehaviorKind::WorkStarted, at(120)),
+            event(BehaviorKind::WorkPaused, at(150)),
+        ];
+
+        assert_eq!(
+            work_summary_from_events(&events, &today, at(150), false, false, MERGE_GAP_MS),
+            WorkSummary {
+                total_minutes: 60,
+                longest_minutes: 30,
+            }
+        );
+    }
+
+    /// 显式休息是用户主动打断连续：休息前后即使贴得很近也不算同一口气。
+    #[test]
+    fn 休息把最长连续切成两块() {
+        let today = DateWindow::day_of(Timestamp::from_millis(0), LocalOffset::utc());
+        let at = |minutes: i64| today.start.saturating_add_millis(minutes * 60_000);
+        let events = vec![
+            event(BehaviorKind::WorkStarted, at(10)),
+            event(BehaviorKind::WorkPaused, at(40)),
+            event(BehaviorKind::BreakStarted, at(40)),
+            event(BehaviorKind::WorkStarted, at(45)),
+            event(BehaviorKind::WorkPaused, at(80)),
+        ];
+
+        assert_eq!(
+            work_summary_from_events(&events, &today, at(80), false, false, MERGE_GAP_MS),
+            WorkSummary {
+                total_minutes: 65,
+                longest_minutes: 35,
+            }
+        );
+    }
+
+    /// 旧版本退出不收尾，库里会留下连续两条 `work.started`。
+    /// 靠得近的是重启衔接：保留更早的起点，把那段真实工作时间找回来，
+    /// 而不是像 0.2.0 之前那样被第二条整个覆盖掉。
+    #[test]
+    fn 历史遗留的连续开始事件靠得近时保留早起点() {
+        let today = DateWindow::day_of(Timestamp::from_millis(0), LocalOffset::utc());
+        let at = |minutes: i64| today.start.saturating_add_millis(minutes * 60_000);
+        // 工作 1 小时 → 应用重启（间隔 5 分钟）→ 旧版本不收尾又记了一条 started
+        let events = vec![
+            event(BehaviorKind::WorkStarted, at(10)),
+            event(BehaviorKind::WorkStarted, at(15)),
+            event(BehaviorKind::WorkPaused, at(80)),
+        ];
+
+        assert_eq!(
+            work_summary_from_events(&events, &today, at(80), false, false, MERGE_GAP_MS),
+            WorkSummary {
+                total_minutes: 70,
+                longest_minutes: 70,
+            }
+        );
+    }
+
+    /// 连续两条 `started` 隔得远：中间是漫长的离开，悬空的旧起点
+    /// 只能丢弃（时长无从得知），从新起点算起 —— 与旧行为一致。
+    #[test]
+    fn 历史遗留的连续开始事件隔得远时用新起点() {
+        let today = DateWindow::day_of(Timestamp::from_millis(0), LocalOffset::utc());
+        let at = |minutes: i64| today.start.saturating_add_millis(minutes * 60_000);
+        let events = vec![
+            event(BehaviorKind::WorkStarted, at(10)),
+            event(BehaviorKind::WorkStarted, at(300)),
+            event(BehaviorKind::WorkPaused, at(320)),
+        ];
+
+        assert_eq!(
+            work_summary_from_events(&events, &today, at(320), false, false, MERGE_GAP_MS),
+            WorkSummary {
+                total_minutes: 20,
+                longest_minutes: 20,
+            }
         );
     }
 

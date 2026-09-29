@@ -218,7 +218,16 @@ fn main() {
             if code.is_none() {
                 api.prevent_exit();
             } else {
-                // 真正要退出了。记一笔，这样日志能分辨「正常退出」与
+                // 真正要退出了。先把还在计的工作段记上终点 ——
+                // 不然这次运行的工作时长只活在内存里，重启后统计
+                // 和「接上」都没有依据。崩溃和强杀到不了这里，
+                // 由启动时的悬空收尾兜底。重复调用是安全的：
+                // 第二次状态不变，不会重复落库。
+                if let Some(shared) = app_handle.try_state::<windows::SharedState>() {
+                    app_state::AppState::lock(&shared)
+                        .close_work_segment_on_exit(tacet_core::Timestamp::now());
+                }
+                // 记一笔，这样日志能分辨「正常退出」与
                 // 「进程被杀 / 崩溃」—— 后者在日志里是**开头有、结尾没有**。
                 logging::info("退出 Tacet");
             }
@@ -307,7 +316,13 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
                 let _ = windows::open_settings(app);
             }
             "quit" => {
-                // 显式退出：这次要真的退出，不能被 ExitRequested 拦下来
+                // 显式退出：这次要真的退出，不能被 ExitRequested 拦下来。
+                // 退出前先把还在计的工作段收尾（ExitRequested 里那道
+                // 是兜底，两处都挂是因为 app.exit 的路径不保证唯一）。
+                if let Some(shared) = app.try_state::<windows::SharedState>() {
+                    app_state::AppState::lock(&shared)
+                        .close_work_segment_on_exit(tacet_core::Timestamp::now());
+                }
                 app.exit(0);
             }
             _ => {}
