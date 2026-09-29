@@ -521,7 +521,8 @@ mod tests {
                 | SettingsKey::ReminderHydrationEnabled
                 | SettingsKey::ReminderMovementEnabled
                 | SettingsKey::ReminderEyeRestEnabled
-                | SettingsKey::DoNotDisturb => serde_json::json!(true),
+                | SettingsKey::DoNotDisturb
+                | SettingsKey::OnboardingCompleted => serde_json::json!(true),
                 _ => serde_json::json!(7),
             };
 

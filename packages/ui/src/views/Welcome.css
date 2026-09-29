@@ -1,0 +1,72 @@
+/**
+ * 首次启动引导的样式。
+ *
+ * 与设置页、今日页同一套文档窗口的语言：实底、中性灰字、一个主按钮。
+ * 不放插画、不做动效 —— 三页话说完就走，别让人觉得在看宣传片。
+ *
+ * 类名一律 welcome- 前缀：CSS 是全局的，撞名会串到别的窗口里。
+ */
+
+.welcome-shell {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶部留给红绿灯，同时是拖动把手 */
+.welcome-drag {
+  flex: 0 0 44px;
+}
+
+.welcome-body {
+  flex: 1 1 auto;
+  padding: var(--space-6) 32px 0;
+}
+
+.welcome-title {
+  margin: 10px 0 18px;
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+  line-height: var(--leading-tight);
+  color: var(--text-primary);
+}
+
+.welcome-line {
+  margin: 0 0 12px;
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
+  color: var(--text-secondary);
+}
+
+.welcome-footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 24px 24px 32px;
+}
+
+.welcome-dots {
+  display: flex;
+  gap: 6px;
+}
+
+.welcome-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.welcome-dot.is-current {
+  background: var(--text-secondary);
+}
+
+.welcome-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

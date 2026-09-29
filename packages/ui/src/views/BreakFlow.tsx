@@ -40,10 +40,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import * as api from "../api";
 import { useCountdown, useTacet } from "../hooks/useTacet";
+import { IconDrop, IconEye, IconWalk, NeedIcon } from "../icons";
 import { pickQuote } from "../quotes";
 import { isOrphanRestingUi } from "../restingState";
 import {
   formatClock,
+  needMeta,
   reasonText,
   type IntentRecord,
   type NeedKind,
@@ -258,9 +260,10 @@ export function BreakFlow() {
     await api.closeCurrentWindow();
   }, []);
 
-  const handleSnooze = useCallback(async (minutes: number) => {
+  const handleSnooze = useCallback(async () => {
     setAutoRestSeconds(null);
-    await api.snoozeBreak(minutes);
+    // 延后多久由后端按退让阶梯决定，前端不再传数。
+    await api.snoozeBreak();
     await api.closeCurrentWindow();
   }, []);
 
@@ -410,7 +413,6 @@ export function BreakFlow() {
     return <div className="break-stage break-loading sub">正在准备…</div>;
   }
 
-  const snoozeOptions = [1, 3, 5];
 
   /**
    * 进度环的分母：这次休息**计划的总时长**，来自 Rust 侧的快照。
@@ -499,9 +501,8 @@ export function BreakFlow() {
           <AskStage
             snapshot={snapshot}
             onStart={() => void handleStartBreak()}
-            onSnooze={(minutes) => void handleSnooze(minutes)}
+            onSnooze={() => void handleSnooze()}
             onSkip={() => void handleSkip()}
-            snoozeOptions={snoozeOptions}
             autoRestSeconds={autoRestSeconds}
           />
         ) : null}
@@ -560,12 +561,24 @@ export function BreakFlow() {
 interface AskStageProps {
   snapshot: NonNullable<ReturnType<typeof useTacet>["snapshot"]>;
   onStart: () => void;
-  onSnooze: (minutes: number) => void;
+  onSnooze: () => void;
   onSkip: () => void;
-  snoozeOptions: number[];
   /** 自动休息的剩余秒数；`null` 表示没有在倒计时。 */
   autoRestSeconds: number | null;
 }
+
+/**
+ * 搭车需求的确认按钮文案与图标（Reminder Fusion，v0.2.2）。
+ *
+ * 休息领衔的提醒会顺带捎上到点的轻需求；这里给每一类一个
+ * 「顺手确认」的按钮。没有休息 —— 它永不搭别人的车，
+ * 它领衔时其它需求才搭它的车。
+ */
+const FUSED_CHIP: Partial<Record<NeedKind, string>> = {
+  hydration: "喝了",
+  movement: "活动过了",
+  eyeRest: "远眺过了",
+};
 
 /**
  * 每类需求在这一屏上的说法与主按钮文案。
@@ -615,7 +628,6 @@ function AskStage({
   onStart,
   onSnooze,
   onSkip,
-  snoozeOptions,
   autoRestSeconds,
 }: AskStageProps) {
   const decision = snapshot.lastDecision;
@@ -624,6 +636,23 @@ function AskStage({
   // 主场景，也是最「重」的一类，退化成它最安全。
   const kind: NeedKind = decision?.kind ?? "rest";
   const copy = ASK_COPY[kind];
+
+  // 这次提醒搭车带来了哪些轻需求（去掉已顺手确认过的）。
+  // 休息不在名单里 —— 它永不搭别人的车。
+  const [fusedDone, setFusedDone] = useState<NeedKind[]>([]);
+  const fusedPending = (decision?.fused ?? []).filter(
+    (candidate) => candidate !== "rest" && !fusedDone.includes(candidate),
+  );
+
+  /** 搭车需求的「顺手确认」：记一笔、按钮消失；不关窗 —— 主按钮的事还没做。 */
+  const handleFused = (fused: NeedKind) => {
+    void (async () => {
+      if (fused === "hydration") await api.logWater();
+      else if (fused === "movement") await api.logActivity();
+      else if (fused === "eyeRest") await api.logEyeRest();
+      setFusedDone((done) => [...done, fused]);
+    })();
+  };
 
   // 「为什么现在提醒我」—— 交互原则 5：提醒卡片上永远能找到理由。
   const why = decision?.reasons ?? [];
@@ -701,16 +730,35 @@ function AskStage({
           )}
         </button>
 
+        {/* 融合搭车的需求：顺手确认，记一笔按钮就消失。
+            放在主按钮之后、延后之前 —— 顺序就是「先把顺手的做掉」。 */}
+        {fusedPending.length > 0 ? (
+          <div className="ask-secondary">
+            {fusedPending.map((fused) => {
+              const label = FUSED_CHIP[fused];
+              if (!label) return null;
+              return (
+                <button
+                  key={fused}
+                  className="btn btn-quiet ask-fused-chip"
+                  onClick={() => handleFused(fused)}
+                >
+                  <span className={`ask-fused-icon tile-${needMeta(fused).category}`}>
+                    <NeedIcon kind={fused} />
+                  </span>
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
         <div className="ask-secondary">
-          {snoozeOptions.map((minutes) => (
-            <button
-              key={minutes}
-              className="btn btn-quiet"
-              onClick={() => onSnooze(minutes)}
-            >
-              {minutes} 分钟后
-            </button>
-          ))}
+          {/* 延后只有一档时长：后端按「连续延后了几次」算好退让档位，
+              这里只负责把数字印出来。连着延后，下次自动更久。 */}
+          <button className="btn btn-quiet" onClick={onSnooze}>
+            {snapshot.snoozeMinutes} 分钟后再说
+          </button>
         </div>
 
         {/* 跳过必须始终可见，且不加任何解释性文案（那会变成变相的指责） */}
@@ -950,55 +998,6 @@ function RestingStage({ remaining, totalSeconds, progress }: RestingStageProps) 
         ) : null}
       </div>
     </div>
-  );
-}
-
-// ------------------------------------------------------------ 清单图标
-
-/**
- * 清单里的小图标。
- *
- * 用 SVG 而不是 emoji：emoji 的彩色和形状由系统决定，在这个
- * 「低信息量」的界面里既吵又不可控；线性图标则能跟着 tile 的
- * 配色走，和其他界面保持一致。
- */
-function IconEye() {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden>
-      <path
-        d="M1.9 10S4.7 5.2 10 5.2 18.1 10 18.1 10 15.3 14.8 10 14.8 1.9 10 1.9 10Z"
-        stroke="currentColor"
-        strokeWidth="1.4"
-      />
-      <circle cx="10" cy="10" r="2.3" stroke="currentColor" strokeWidth="1.4" />
-    </svg>
-  );
-}
-
-function IconDrop() {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden>
-      <path
-        d="M10 2.8c2.7 3.1 4.4 5.5 4.4 7.5a4.4 4.4 0 0 1-8.8 0c0-2 1.7-4.4 4.4-7.5Z"
-        stroke="currentColor"
-        strokeWidth="1.4"
-      />
-    </svg>
-  );
-}
-
-function IconWalk() {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden>
-      <circle cx="11.2" cy="4" r="1.6" stroke="currentColor" strokeWidth="1.4" />
-      <path
-        d="M11.6 6.9 9 9.3l1.4 2.4-.9 5M11.6 6.9l2 2.9 2.3.8M10.4 11.7 6.5 12.3"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
   );
 }
 

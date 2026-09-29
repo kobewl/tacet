@@ -116,6 +116,10 @@ fn main() {
                 ));
             }
 
+            // 全新安装才招呼一次（老用户在 AppState::new 里已被补记为看过）。
+            // 读失败按「不展示」处理：宁可少一次招呼，也不每次启动都弹。
+            let show_welcome = state.onboarding_needed().unwrap_or(false);
+
             let shared: windows::SharedState = Arc::new(Mutex::new(state));
             app.manage(Arc::clone(&shared));
 
@@ -146,6 +150,15 @@ fn main() {
             // ⑥ 调度线程
             scheduler::spawn(app.handle().clone(), shared);
 
+            // ⑦ 首次启动引导：在第一次提醒之前先打个招呼
+            //（最短的提醒间隔也有 5 分钟，引导早就在屏幕上了）。
+            if show_welcome {
+                logging::info("首次启动：展示引导");
+                if let Err(err) = windows::open_welcome(app.handle()) {
+                    logging::warn(&format!("打不开首次启动引导（不影响使用）：{err}"));
+                }
+            }
+
             Ok(())
         })
         // ------------------------------------------------ 命令
@@ -172,6 +185,7 @@ fn main() {
             commands::open_settings_window,
             commands::open_today_window,
             commands::close_current_window,
+            commands::complete_onboarding,
             commands::resize_panel,
             // 应用内更新（见 update 模块：检查与安装分开，各自可失败）
             update::check_update,
@@ -199,6 +213,16 @@ fn main() {
                     if matches!(window.label(), "settings" | "today") {
                         api.prevent_close();
                         let _ = window.hide();
+                    }
+                    // 引导窗口点了红叉 = 跳过：记为已看过，下次不再弹。
+                    if window.label() == "welcome" {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        if let Some(state) = window.try_state::<windows::SharedState>() {
+                            if let Err(err) = AppState::lock(&state).complete_onboarding() {
+                                logging::warn(&format!("记录引导状态失败：{err}"));
+                            }
+                        }
                     }
                 }
 

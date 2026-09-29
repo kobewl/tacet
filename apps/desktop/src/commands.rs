@@ -493,19 +493,17 @@ pub fn skip_break(
 }
 
 /// 用户延后这次提醒。
+///
+/// 延后多久由后端按退让阶梯决定（同一需求连着延后，档位就越长），
+/// 前端按钮的文案读的是快照里的同一个值 —— 不给「界面说 5 分钟、
+/// 实际延了 30 分钟」留口子。
 #[tauri::command]
-pub fn snooze_break(
-    app: AppHandle,
-    state: State<'_, SharedState>,
-    minutes: u32,
-) -> CmdResult<serde_json::Value> {
+pub fn snooze_break(app: AppHandle, state: State<'_, SharedState>) -> CmdResult<serde_json::Value> {
     let now = tacet_core::Timestamp::now();
-    // 延后时长夹取到合理区间：防止前端传一个 10000 分钟把提醒彻底关掉
-    let minutes = minutes.clamp(1, 60);
 
     let snapshot = {
         let mut guard = AppState::lock(&state);
-        guard.snooze(minutes, now)?;
+        guard.snooze(now)?;
         scheduler::build_snapshot(&guard)
     };
 
@@ -623,7 +621,9 @@ pub fn preview_reminder(
     let need_kind = match kind.as_deref() {
         Some("hydration") => NeedKind::Hydration,
         Some("movement") => NeedKind::Movement,
-        Some("eye_rest") => NeedKind::EyeRest,
+        // 前端 NeedKind 是 camelCase（eyeRest），早先这里只认 eye_rest，
+        // 设置页「看看提醒长什么样 → 护眼」一直悄悄预览成了休息。两种都认。
+        Some("eye_rest" | "eyeRest") => NeedKind::EyeRest,
         // 默认休息：它是产品的主场景
         _ => NeedKind::Rest,
     };
@@ -648,10 +648,13 @@ pub fn preview_reminder(
         fused: Vec::new(),
     };
 
-    // 让界面按这次预览的决策渲染文案（内存字段，下一次真实 tick 会覆盖它）
+    // 让界面按这次预览的决策渲染文案（内存字段）。
+    // 同时写进 `active_decision`：快照优先展示「正在回应的那一条」，
+    // 只写 last_decision 的话，下一拍 tick 就会把预览页原地换掉。
     {
         let mut guard = AppState::lock(&state);
         guard.last_decision = Some(decision.clone());
+        guard.active_decision = Some(decision.clone());
     }
 
     windows::show_break_window(&app)?;
@@ -680,6 +683,7 @@ pub fn preview_reminder(
         "level": 4,
         "reasons": decision.reasons,
         "actions": decision.actions,
+        "fused": Vec::<&str>::new(),
     }))
 }
 
@@ -773,6 +777,15 @@ pub fn open_today_window(app: AppHandle) -> CmdResult<()> {
             Err(err.into())
         }
     }
+}
+
+/// 首次启动引导看完或跳过：记下来并关掉引导窗口。
+#[tauri::command]
+pub fn complete_onboarding(app: AppHandle, state: State<'_, SharedState>) -> CmdResult<()> {
+    AppState::lock(&state).complete_onboarding()?;
+    crate::logging::info("首次启动引导：已完成");
+    windows::close_welcome(&app);
+    Ok(())
 }
 
 /// 关闭当前窗口（Overlay 的按钮用它）。

@@ -123,14 +123,19 @@ pub fn show_break_window(app: &AppHandle) -> tauri::Result<()> {
         // 会再次触发 `start_break`，那时窗口本来就是可见的。
         // 如果把这种情况也当成「重新打开」，前端会把阶段重置回
         // 「填写待办」—— 用户刚点完「开始休息」，界面却又问他要做什么。
-        let reopening = !window.is_visible().unwrap_or(false);
+        //
+        // 「重新出现」由 fade 模块判断：除了原本隐藏，还包括「正在淡出」——
+        // 淡出期间窗口在系统眼里仍是可见的，只看 is_visible 会漏掉。
 
         // 每次显示前重新适配当前屏幕 —— 用户可能换了显示器、
         // 或者把窗口拖到了另一块屏上。
         if let Some(monitor) = &target {
             fit_to_monitor(&window, monitor);
         }
-        window.show()?;
+        // 慢慢模糊：整块窗口（连同原生毛玻璃）从透明淡入，
+        // 看起来就是清晰的桌面一点点失焦。见 fade 模块的说明。
+        let reopening =
+            crate::fade::show_with_fade(&window, std::time::Duration::ZERO, crate::fade::FADE_IN)?;
         window.set_focus()?;
 
         if reopening {
@@ -167,7 +172,7 @@ pub fn show_break_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(monitor) = &target {
         fit_to_monitor(&window, monitor);
     }
-    window.show()?;
+    crate::fade::show_with_fade(&window, std::time::Duration::ZERO, crate::fade::FADE_IN)?;
     window.set_focus()?;
     announce_break_shown(app);
 
@@ -424,10 +429,10 @@ fn show_break_veils_inner(app: &AppHandle, verbose: bool) -> tauri::Result<()> {
     let mut newly_shown = 0u32;
     for (label, monitor) in &wanted {
         let window = veil_window(app, label)?;
-        let was_visible = window.is_visible().unwrap_or(false);
         fit_to_monitor(&window, monitor);
-        window.show()?;
-        if !was_visible {
+        // 这里每 10 秒会被 tick 补铺调用一次：已经完整显示着的幕布
+        // show_with_fade 什么都不改，只有真正新盖上的才从透明淡入。
+        if crate::fade::show_with_fade(&window, crate::fade::VEIL_DELAY, crate::fade::FADE_IN)? {
             newly_shown += 1;
         }
     }
@@ -622,7 +627,7 @@ fn veil_targets(screens: &[ScreenBox], primary: Option<ScreenBox>) -> Vec<usize>
 pub fn hide_break_veils(app: &AppHandle) {
     for (label, window) in app.webview_windows() {
         if label.starts_with(VEIL_PREFIX) {
-            let _ = window.hide();
+            crate::fade::hide_with_fade(&window);
         }
     }
 }
@@ -659,7 +664,10 @@ pub fn reconcile_break_windows(app: &AppHandle) {
     // 注意这里判的是**可见性**而不是工作状态：询问阶段（用户还没点
     // 「现在休息」）主窗口是可见的，而工作状态仍是 Working ——
     // 拿状态当依据会把询问界面一起收掉，那是个 bug。
-    if !main.is_visible().unwrap_or(false) {
+    //
+    // 正在淡出的主窗口也按「已收起」处理：它在系统眼里还可见，
+    // 但幕布此刻应当跟着退场，而不是被当成漏盖的屏幕重新铺上。
+    if !main.is_visible().unwrap_or(false) || crate::fade::is_fading_out(&main) {
         hide_break_veils(app);
         return;
     }
@@ -677,7 +685,8 @@ pub fn reconcile_break_windows(app: &AppHandle) {
 /// 继续盖着白雾，用户看到的是「休息结束了但屏幕还是坏的」。
 pub fn hide_break_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("break") {
-        let _ = window.hide();
+        // 退场也是渐隐：画面从模糊里慢慢清回来，而不是整块白雾瞬间消失。
+        crate::fade::hide_with_fade(&window);
     }
     hide_break_veils(app);
 }
@@ -1018,6 +1027,41 @@ pub fn open_today(app: &AppHandle) -> tauri::Result<()> {
     present_document_window(app, &window);
 
     Ok(())
+}
+
+/// 打开首次启动引导窗口（v0.2.2）。
+///
+/// 只在全新安装的第一次启动时由 `main.rs` 调用。它是普通文档窗口，
+/// 不置顶、不盖屏：引导的全部意义是「在第一次打扰之前先打个招呼」，
+/// 它自己不能先变成一次打扰。
+pub fn open_welcome(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("welcome") {
+        present_document_window(app, &window);
+        return Ok(());
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        "welcome",
+        WebviewUrl::App("index.html?view=welcome".into()),
+    )
+    .title("欢迎使用 Tacet")
+    .inner_size(440.0, 520.0)
+    .resizable(false)
+    .title_bar_style(tauri::TitleBarStyle::Overlay)
+    .hidden_title(true)
+    .build()?;
+
+    present_document_window(app, &window);
+
+    Ok(())
+}
+
+/// 收起引导窗口（看完 / 跳过之后）。
+pub fn close_welcome(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("welcome") {
+        let _ = window.hide();
+    }
 }
 
 /// 发一条系统通知。

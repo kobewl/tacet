@@ -56,9 +56,18 @@ objc2-foundation = { version = "0.3", features = ["NSString", "NSArray"] }
 # 用于告诉 macOS「登录时不要用恢复窗口的方式再拉起我一遍」——
 # 不关掉这条路径，设置页里的自启开关就是坏的（关掉了也照样自启）。
 # 见 src/autostart.rs 的说明。
+#
+# NSWindow / NSResponder / objc2-core-foundation：整屏提醒的「慢慢模糊」要逐帧改
+# 窗口的 alphaValue（原生毛玻璃画在网页下面，CSS 动不了它，见 src/fade.rs）。
+# NSWorkspace / NSAccessibility：读系统的「减弱动态效果」开关。
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSApplication",
+    "NSResponder",
+    "NSWindow",
+    "NSWorkspace",
+    "NSAccessibility",
+    "objc2-core-foundation",
 ] }
 
 [dev-dependencies]

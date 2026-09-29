@@ -57,6 +57,15 @@ use crate::time::{Timestamp, MINUTE};
 /// 的论据更重要。一个不说谎的 45 分钟，比一个善意的 34 分钟可信。
 pub const DEFAULT_TRIGGER_THRESHOLD: f64 = 1.0;
 
+/// Reminder Fusion 的观察窗（分钟）：领衔需求开口时，
+/// 这么久之内要到点的轻需求会搭同一趟车。
+///
+/// 窗口取 5 分钟的依据：太短（1~2 分钟）起不到「一次把账记清」的效果，
+/// 下一次提醒很快就来；太长（15 分钟起）等于把还没到点的需求提前
+/// 半个间隔打扰用户，违背「安静是默认」。5 分钟是「顺手」与「打扰」
+/// 的平衡点，与空闲阈值的量级一致。
+pub const FUSION_HORIZON_MINUTES: i64 = 5;
+
 /// 同类提醒之间的**最小**冷却时间（PRD §3.3 通用约束 4）。
 ///
 /// ## 为什么是「最小」而不是固定值
@@ -126,7 +135,7 @@ pub struct RecentHistory {
 }
 
 /// 最近一次干预的摘要。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterventionRecap {
     /// 为了哪类需求。
     pub kind: NeedKind,
@@ -134,12 +143,17 @@ pub struct InterventionRecap {
     pub level: InterventionLevel,
     /// 什么时候发的。
     pub fired_at: Timestamp,
+    /// 这次提醒融合捎带了哪些需求（Reminder Fusion，v0.2 起使用）。
+    ///
+    /// 搭车的需求同样要进冷却：否则融合提醒刚过去，下一个 tick
+    /// 搭车需求自己又弹一次整屏 —— 合并反而变成了加倍打扰。
+    pub fused: Vec<NeedKind>,
 }
 
 impl RecentHistory {
     /// 距上次同类提醒过了多久（分钟）；没有记录时为 `None`。
     pub fn minutes_since_last_of(&self, kind: NeedKind, now: Timestamp) -> Option<u32> {
-        let last = self.last_intervention?;
+        let last = self.last_intervention.as_ref()?;
         if last.kind != kind {
             return None;
         }
@@ -150,9 +164,13 @@ impl RecentHistory {
     ///
     /// 冷却时长由调用方传入（见 [`cooldown_for`]）——
     /// 它必须跟着用户的提醒间隔走，不能是固定值。
+    ///
+    /// 融合进上次提醒的需求同样算「刚提醒过」：那次打扰里它确实出现过了，
+    /// 只是以搭车的形式。不认这笔账的话，融合提醒刚关掉，
+    /// 搭车需求下一拍就会自己再弹一次整屏。
     fn is_in_cooldown(&self, kind: NeedKind, now: Timestamp, cooldown_ms: i64) -> Option<u32> {
-        let last = self.last_intervention?;
-        if last.kind != kind {
+        let last = self.last_intervention.as_ref()?;
+        if last.kind != kind && !last.fused.contains(&kind) {
             return None;
         }
 
@@ -282,8 +300,46 @@ impl PolicyEngine {
     /// 5. 用户刚延后过 → 闭嘴（延后是承诺，不能言而无信）
     /// 6. 需求高 + 场景适合 → 开口，并决定用哪一级
     pub fn decide(&self, input: &DecisionInput) -> InterventionDecision {
-        let (kind, score) = input.needs.highest();
+        let (natural_kind, natural_score) = input.needs.highest();
 
+        // 休息是主位：休息已到点、或 FUSION_HORIZON_MINUTES 内要到点时，
+        // 即使不是最高分也优先由休息领衔 —— 它是最重的一类需求，值得独占
+        // 一次整屏；其它到点的轻需求搭它的车，一次把账记清。
+        // 反过来，休息**永不搭别人的车**：否则「喝水中途开始休息」
+        // 这类嵌套流程会把整屏提醒的状态机搅得很复杂，收益却很小。
+        let rest = input.needs.rest;
+        let rest_interval = input
+            .preferences
+            .reminders
+            .interval_minutes(NeedKind::Rest)
+            .unwrap_or(50);
+        // 关掉的提醒不领衔：分数本来就是 0，但间隔设到最小 5 分钟时，
+        // 「0 分 + 5 分钟间隔」会恰好落进观察窗，这里显式挡一道。
+        let rest_enabled = input.preferences.reminders.is_enabled(NeedKind::Rest);
+        let rest_due_soon = rest_enabled
+            && (rest.at_least(self.trigger_threshold)
+                || Self::due_within(rest, rest_interval, FUSION_HORIZON_MINUTES));
+
+        if natural_kind != NeedKind::Rest && rest_due_soon {
+            // 休息领衔优先尝试。但休息自己若正被冷却/延后拦着，
+            // 不能让它压住本该开口的轻需求 —— 那会造成「什么提醒都没有」；
+            // 此时回落到自然最高分，休息这趟车它下一拍自己开。
+            let attempt = self.decide_for(NeedKind::Rest, rest, input);
+            if attempt.will_disturb() {
+                return attempt;
+            }
+        }
+
+        self.decide_for(natural_kind, natural_score, input)
+    }
+
+    /// 以 `kind` 为领衔需求做一次决策（decide 的主体）。
+    fn decide_for(
+        &self,
+        kind: NeedKind,
+        score: NeedScore,
+        input: &DecisionInput,
+    ) -> InterventionDecision {
         // ① 休息中：不重复提醒。
         if input.is_breaking {
             return InterventionDecision::silent(kind, vec![Reason::ContextUnavailable]);
@@ -295,8 +351,15 @@ impl PolicyEngine {
             return InterventionDecision::silent(kind, vec![Reason::DoNotDisturb]);
         }
 
-        // ③ 需求没到阈值。
-        if !score.at_least(self.trigger_threshold) {
+        // ③ 需求没到阈值 —— 领衔需求或任一搭车候选到了才开口。
+        //    只看领衔会让「休息还差 3 分钟、喝水已到点」落进静默，
+        //    等 3 分钟后休息到点再弹一次 —— 合并打扰本来就是为了避免这个。
+        let fused = self.fusion_candidates(kind, input);
+        let any_due = score.at_least(self.trigger_threshold)
+            || fused
+                .iter()
+                .any(|f| input.needs.get(*f).at_least(self.trigger_threshold));
+        if !any_due {
             return InterventionDecision::silent(
                 kind,
                 vec![Reason::NeedBelowThreshold {
@@ -342,6 +405,15 @@ impl PolicyEngine {
         // ⑥ 开口。先把「为什么」收集齐，再决定用多大声。
         let mut reasons = self.build_reasons(kind, score, input);
 
+        // 融合了谁，就如实写进理由：它既是给用户看的文案
+        // （「顺带提醒喝水」），也是落库后的归因依据
+        // （冷却判断靠它把搭车需求一起安静下来）。
+        if !fused.is_empty() {
+            reasons.push(Reason::FusedWith {
+                kinds: fused.clone(),
+            });
+        }
+
         let (level, level_reasons) = self.choose_level(kind, score, input);
         // 降级的理由也要写进决策：用户看到「因为你在全屏，所以只发了通知」，
         // 才会相信这套系统是真的在替他考虑，而不是随机选了个弱一点的方式。
@@ -354,8 +426,63 @@ impl PolicyEngine {
             level,
             reasons,
             actions,
-            fused: Vec::new(),
+            fused,
         }
+    }
+
+    /// 挑出这次提醒可以顺带捎上的需求（Reminder Fusion）。
+    ///
+    /// 候选资格（全部满足才搭车）：
+    /// 1. 不是领衔需求自己，也**不是休息** —— 休息永不搭车，见 decide；
+    /// 2. 已到点，或 [`FUSION_HORIZON_MINUTES`] 内要到点 ——
+    ///    还早的需求搭车只是给界面添噪；
+    /// 3. 自己不在冷却期 —— 刚提醒过的需求不该借融合的名义再露一次脸；
+    /// 4. 用户没把这类提醒关掉 —— 关掉了就是不想听，搭车也不行。
+    ///
+    /// 候选顺序按 [`NeedKind::ALL`] 固定排序，同样的输入永远得到同样的名单。
+    fn fusion_candidates(&self, leader: NeedKind, input: &DecisionInput) -> Vec<NeedKind> {
+        let mut candidates = Vec::new();
+        for kind in NeedKind::ALL {
+            if kind == leader
+                || kind == NeedKind::Rest
+                || !input.preferences.reminders.is_enabled(kind)
+            {
+                continue;
+            }
+            let score = input.needs.get(kind);
+            let interval = input
+                .preferences
+                .reminders
+                .interval_minutes(kind)
+                .unwrap_or(50);
+            let due = score.at_least(self.trigger_threshold)
+                || Self::due_within(score, interval, FUSION_HORIZON_MINUTES);
+            if !due {
+                continue;
+            }
+            let cooldown = cooldown_for(interval);
+            if input
+                .recent
+                .is_in_cooldown(kind, input.now, cooldown)
+                .is_some()
+            {
+                continue;
+            }
+            candidates.push(kind);
+        }
+        candidates
+    }
+
+    /// 需求是否会在 `horizon_minutes` 内到点。
+    ///
+    /// 分数是线性时间进度（已过时长 ÷ 间隔），所以「还要等多久」
+    /// 可以直接反推：剩余比例 × 间隔 ≤ 观察窗。
+    fn due_within(score: NeedScore, interval_minutes: u32, horizon_minutes: i64) -> bool {
+        if interval_minutes == 0 {
+            return false;
+        }
+        let remaining_ms = (1.0 - score.get()) * (interval_minutes as f64) * MINUTE as f64;
+        remaining_ms <= horizon_minutes as f64 * MINUTE as f64
     }
 
     /// 组装「为什么现在提醒我」。
@@ -628,6 +755,7 @@ mod tests {
             kind: NeedKind::Hydration,
             level: InterventionLevel::FullScreen,
             fired_at: t0().saturating_sub_millis(4 * MINUTE),
+            fused: Vec::new(),
         });
 
         let decision = engine.decide(&input);
@@ -651,6 +779,7 @@ mod tests {
             kind: NeedKind::Hydration,
             level: InterventionLevel::FullScreen,
             fired_at: t0().saturating_sub_millis(46 * MINUTE),
+            fused: Vec::new(),
         });
 
         assert_eq!(
@@ -686,6 +815,7 @@ mod tests {
                 kind: NeedKind::Hydration,
                 level: InterventionLevel::FullScreen,
                 fired_at: t0().saturating_sub_millis(20 * MINUTE),
+                fused: Vec::new(),
             });
             input
         };
@@ -726,10 +856,161 @@ mod tests {
         input.recent.last_intervention = Some(InterventionRecap {
             kind: NeedKind::Hydration,
             level: InterventionLevel::FullScreen,
-            fired_at: t0().saturating_sub_millis(MINUTE),
+            fired_at: t0(),
+            fused: Vec::new(),
         });
 
         assert_eq!(engine.decide(&input).level, InterventionLevel::FullScreen);
+    }
+
+    // ======================= Reminder Fusion（v0.2.2）=======================
+
+    /// 融合的核心场景：休息领衔，已到点的喝水搭车，理由里如实写明带了谁。
+    #[test]
+    fn 休息领衔时到点的喝水搭车() {
+        let engine = PolicyEngine::new();
+        let mut needs = HealthNeeds::none();
+        needs.set(NeedKind::Rest, NeedScore::ONE);
+        needs.set(NeedKind::Hydration, NeedScore::ONE);
+        let input = base_input(needs);
+
+        let decision = engine.decide(&input);
+
+        assert_eq!(decision.kind, NeedKind::Rest);
+        assert_eq!(decision.fused, vec![NeedKind::Hydration]);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|r| matches!(r, Reason::FusedWith { kinds }
+                if kinds == &vec![NeedKind::Hydration])));
+        assert_eq!(decision.level, InterventionLevel::FullScreen);
+    }
+
+    /// 休息在观察窗内但还没到阈值时，也由休息领衔，把已到点的喝水
+    /// 一起带上 —— 否则喝水先弹一次、几分钟后休息再弹一次，
+    /// 合并打扰本来就是为了避免这个。
+    #[test]
+    fn 休息在观察窗内时领衔并把到点的喝水带上() {
+        let engine = PolicyEngine::new();
+        let mut needs = HealthNeeds::none();
+        // 休息间隔 50 分钟：0.95 → 还差 2.5 分钟到点，落在 5 分钟观察窗内
+        needs.set(NeedKind::Rest, NeedScore::new(0.95));
+        needs.set(NeedKind::Hydration, NeedScore::ONE);
+        let input = base_input(needs);
+
+        let decision = engine.decide(&input);
+
+        assert_eq!(decision.kind, NeedKind::Rest);
+        assert_eq!(decision.fused, vec![NeedKind::Hydration]);
+        assert_eq!(decision.level, InterventionLevel::FullScreen);
+    }
+
+    /// 搭车的需求同样进冷却：融合提醒刚过去，搭车需求不许
+    /// 下一拍自己再弹一次 —— 那会把「合并打扰」变成「加倍打扰」。
+    #[test]
+    fn 搭车的需求也进冷却期() {
+        let engine = PolicyEngine::new();
+        let mut input = base_input(needs_with(NeedKind::Hydration, 1.0));
+        input.recent.last_intervention = Some(InterventionRecap {
+            kind: NeedKind::Rest,
+            level: InterventionLevel::FullScreen,
+            fired_at: t0().saturating_sub_millis(MINUTE),
+            fused: vec![NeedKind::Hydration],
+        });
+
+        let decision = engine.decide(&input);
+
+        assert_eq!(
+            decision.level,
+            InterventionLevel::Silent,
+            "融合提醒 1 分钟前刚捎带过喝水，不该再单独弹一次"
+        );
+    }
+
+    /// 休息领衔的尝试被自己的冷却拦住时，回落到自然最高分：
+    /// 轻需求照常开口，休息不搭车、也不挡路。
+    #[test]
+    fn 休息被冷却拦住时不挡轻需求也不搭车() {
+        let engine = PolicyEngine::new();
+        let mut needs = HealthNeeds::none();
+        needs.set(NeedKind::Hydration, NeedScore::ONE);
+        needs.set(NeedKind::Rest, NeedScore::new(0.95));
+        let mut input = base_input(needs);
+        input.recent.last_intervention = Some(InterventionRecap {
+            kind: NeedKind::Rest,
+            level: InterventionLevel::FullScreen,
+            fired_at: t0().saturating_sub_millis(MINUTE),
+            fused: Vec::new(),
+        });
+
+        let decision = engine.decide(&input);
+
+        assert_eq!(decision.kind, NeedKind::Hydration);
+        assert!(
+            !decision.fused.contains(&NeedKind::Rest),
+            "休息永不搭别人的车"
+        );
+        assert_eq!(decision.level, InterventionLevel::FullScreen);
+    }
+
+    /// 还早的需求不搭车：观察窗之外的需求出现在提醒里只是添噪。
+    #[test]
+    fn 没到点的需求不搭车() {
+        let engine = PolicyEngine::new();
+        let mut needs = HealthNeeds::none();
+        needs.set(NeedKind::Rest, NeedScore::ONE);
+        // 喝水间隔 45 分钟：0.5 → 还差 22 分钟，远在观察窗外
+        needs.set(NeedKind::Hydration, NeedScore::new(0.5));
+        let input = base_input(needs);
+
+        let decision = engine.decide(&input);
+
+        assert_eq!(decision.kind, NeedKind::Rest);
+        assert!(decision.fused.is_empty());
+        assert!(!decision
+            .reasons
+            .iter()
+            .any(|r| matches!(r, Reason::FusedWith { .. })));
+    }
+
+    /// 刚提醒过的需求不借融合再露一次脸。
+    #[test]
+    fn 冷却中的需求不进搭车名单() {
+        let engine = PolicyEngine::new();
+        let mut needs = HealthNeeds::none();
+        needs.set(NeedKind::Rest, NeedScore::ONE);
+        needs.set(NeedKind::Hydration, NeedScore::ONE);
+        needs.set(NeedKind::Movement, NeedScore::ONE);
+        let mut input = base_input(needs);
+        // 喝水 1 分钟前刚被单独提醒过
+        input.recent.last_intervention = Some(InterventionRecap {
+            kind: NeedKind::Hydration,
+            level: InterventionLevel::FullScreen,
+            fired_at: t0().saturating_sub_millis(MINUTE),
+            fused: Vec::new(),
+        });
+
+        let decision = engine.decide(&input);
+
+        assert_eq!(decision.kind, NeedKind::Rest);
+        assert_eq!(decision.fused, vec![NeedKind::Movement]);
+    }
+
+    /// 用户关掉的提醒不搭车：间隔设到最小 5 分钟时，0 分也会
+    /// 恰好压在观察窗边上 —— 关了就是不想听，不能借融合溜进来。
+    #[test]
+    fn 关掉的提醒不搭车() {
+        let engine = PolicyEngine::new();
+        let mut needs = HealthNeeds::none();
+        needs.set(NeedKind::Rest, NeedScore::ONE);
+        let mut input = base_input(needs);
+        input.preferences.reminders.hydration.enabled = false;
+        input.preferences.reminders.hydration.interval_minutes = 5;
+
+        let decision = engine.decide(&input);
+
+        assert_eq!(decision.kind, NeedKind::Rest);
+        assert!(decision.fused.is_empty());
     }
 
     #[test]
@@ -798,7 +1079,9 @@ mod tests {
     fn 多条需求同时超过阈值时取最急的那个() {
         let engine = PolicyEngine::new();
         let needs = HealthNeeds {
-            rest: NeedScore::new(0.90),
+            // 休息 0.80：距到点还有 10 分钟，在融合观察窗（5 分钟）之外，
+            // 不会触发「休息主位」提升 —— 此时严格按最高分领衔。
+            rest: NeedScore::new(0.80),
             hydration: NeedScore::new(1.0),
             movement: NeedScore::new(0.95),
             eye_rest: NeedScore::new(0.50),
@@ -806,6 +1089,25 @@ mod tests {
 
         let decision = engine.decide(&base_input(needs));
         assert_eq!(decision.kind, NeedKind::Hydration);
+    }
+
+    /// 「休息主位」的边界：休息恰好在观察窗边缘（还差 5 分钟到点）时，
+    /// 即使喝水分数更高，也由休息领衔 —— 这是 v0.2.2 有意的产品决定，
+    /// 不是「取最急」回归的破坏。见 `decide` 里的说明。
+    #[test]
+    fn 休息贴着观察窗边缘时也会领衔() {
+        let engine = PolicyEngine::new();
+        let needs = HealthNeeds {
+            // 休息间隔 50 分钟：0.90 → 还差 5 分钟，恰好压着观察窗
+            rest: NeedScore::new(0.90),
+            hydration: NeedScore::new(1.0),
+            movement: NeedScore::ZERO,
+            eye_rest: NeedScore::ZERO,
+        };
+
+        let decision = engine.decide(&base_input(needs));
+        assert_eq!(decision.kind, NeedKind::Rest);
+        assert_eq!(decision.fused, vec![NeedKind::Hydration]);
     }
 
     #[test]

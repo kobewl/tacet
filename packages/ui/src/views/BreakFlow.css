@@ -119,16 +119,20 @@
       rgba(250, 247, 243, 0.86) 100%
     );
 
-  animation: veilIn 700ms var(--ease-out) both;
+  /* 晚半拍、慢慢铺：窗口本身正在原生淡入（桌面一点点失焦，见 fade.rs），
+     这层白雾等模糊起来一些再浮上来。先「糊」、再「静」，
+     两件事叠在同一时刻就又变回「啪」的一下。 */
+  animation: veilIn 1700ms var(--ease-out) 500ms both;
   pointer-events: none;
 }
 
 /**
- * 屏幕被蒙住的过程。
+ * 白雾铺开的过程。
  *
- * 700ms 是试出来的：再快就是「闪一下」（用户来不及意识到挡住了什么），
- * 再慢会让人等（提醒是来打断的，它的开场不该比它提醒的事还长）。
- * 缓动用 ease-out：开头快、结尾缓 —— 先迅速盖住，再稳稳停住。
+ * v0.2.2 起，「屏幕被蒙住」的主角换成了窗口的原生淡入（2.2 秒，
+ * 模糊本身在慢慢加深）；这层调色只负责最后那一点「静下来」的白。
+ * 时长跟着拉长到 1.7 秒、晚 0.5 秒起步，和原生淡入差不多同时收尾。
+ * 缓动用 ease-out：开头快、结尾缓 —— 稳稳停住，而不是撞到终点。
  */
 @keyframes veilIn {
   from {
@@ -191,10 +195,10 @@
   width: 100%;
   padding: 48px;
 
-  /* 背景铺开之后再浮上来（延迟 260ms ≈ veilIn 的 700ms 走完三分之一）。
-     这个先后的意义是「先蒙住屏幕，再问你问题」—— 反过来就成了
+  /* 画面糊到一半再浮上来（延迟 0.9 秒 ≈ 原生淡入走完四成）。
+     这个先后的意义是「先让屏幕慢慢模糊，再问你问题」—— 反过来就成了
      「问题先砸到脸上，然后屏幕才变色」。 */
-  animation: contentIn 520ms var(--ease-out) 260ms both;
+  animation: contentIn 700ms var(--ease-out) 900ms both;
 }
 
 /**
@@ -268,10 +272,9 @@
 }
 
 .ask-primary {
-  min-width: 180px;
-  height: 44px;
+  min-width: 200px;
+  height: 46px;
   font-size: 15px;
-  border-radius: var(--radius-lg);
 }
 
 /**
@@ -331,6 +334,31 @@
 .ask-secondary {
   display: flex;
   gap: 9px;
+}
+
+/* 延后与搭车确认：和主按钮同高一档的胶囊，别小得像脚注 */
+.ask-secondary .btn {
+  height: 38px;
+  padding: 0 18px;
+}
+
+/* 搭车确认按钮里的小图标底座 */
+.ask-fused-chip {
+  gap: 7px;
+}
+
+.ask-fused-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+}
+
+.ask-fused-icon svg {
+  width: 13px;
+  height: 13px;
 }
 
 .ask-secondary .btn-quiet {

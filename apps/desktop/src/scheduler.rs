@@ -192,12 +192,25 @@ pub fn build_snapshot(state: &AppState) -> Option<serde_json::Value> {
             })
         });
 
-    let last_decision = state.last_decision.as_ref().map(|decision| {
+    // 有人正在回应的打扰时，界面看的是**弹给他的那一条**；
+    // 否则才是最近一拍的诊断性决策。不这样做，询问页会在
+    // 下一拍 tick 后原地变脸（领衔需求、理由、搭车按钮全换掉）。
+    let shown_decision = state
+        .active_decision
+        .as_ref()
+        .or(state.last_decision.as_ref());
+    let last_decision = shown_decision.map(|decision| {
         serde_json::json!({
             "kind": need_kind_str(decision.kind),
             "level": decision.level.as_i64(),
             "reasons": decision.reasons,
             "actions": decision.actions,
+            // 搭车名单用前端口径（eyeRest），与 kind 同一套映射
+            "fused": decision
+                .fused
+                .iter()
+                .map(|kind| need_kind_str(*kind))
+                .collect::<Vec<_>>(),
         })
     });
 
@@ -242,6 +255,9 @@ pub fn build_snapshot(state: &AppState) -> Option<serde_json::Value> {
         "lastWaterMinutesAgo": minutes_since(BehaviorKind::WaterLogged),
         "lastActivityMinutesAgo": minutes_since(BehaviorKind::ActivityLogged),
         "lastEyeRestMinutesAgo": minutes_since(BehaviorKind::EyeRestLogged),
+        // 延后按钮该显示多少分钟：后端按退让阶梯算好，
+        // 前端只负责把数字印在按钮上。
+        "snoozeMinutes": state.offered_snooze_minutes(),
         "today": today_summary,
         "week": week_summary,
         "doNotDisturb": prefs.do_not_disturb,

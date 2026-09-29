@@ -46,6 +46,12 @@ pub enum Reason {
     NeedBelowThreshold { kind: NeedKind, percent: u32 },
     /// 同类提醒刚刚发过，为了不烦人而主动限流。
     RateLimited { kind: NeedKind, minutes_ago: u32 },
+    /// 这次提醒顺带捎上了哪些需求（Reminder Fusion，v0.2 起使用）。
+    ///
+    /// 它既是**归因**（数据库里凭这条理由还原「这次提醒带了谁」，
+    /// 冷却判断靠它让搭车的需求也安静下来），也是**文案**
+    /// （「为什么现在提醒我」里的一行：顺带提醒喝水、活动）。
+    FusedWith { kinds: Vec<NeedKind> },
     /// 平台能力不可用，本次判断缺少依据（渐进增强原则 6）。
     ContextUnavailable,
 }
@@ -68,6 +74,17 @@ impl Reason {
             Reason::RateLimited { kind, minutes_ago } => {
                 format!("{}分钟前刚提醒过{}", minutes_ago, kind.display_name())
             }
+            Reason::FusedWith { kinds } => {
+                // 「顺带提醒喝水、活动」—— 实事求是地说明这次提醒捎带了谁。
+                // 空列表不该出现（融合为空时根本不会写入这条理由），
+                // 真出现了也只渲染成一句话，不 panic。
+                if kinds.is_empty() {
+                    "这次提醒合并了多项需求".to_string()
+                } else {
+                    let names: Vec<&str> = kinds.iter().map(|k| k.display_name()).collect();
+                    format!("顺带提醒{}", names.join("、"))
+                }
+            }
             Reason::ContextUnavailable => "暂时读不到上下文，按基础规则处理".to_string(),
         }
     }
@@ -84,6 +101,7 @@ impl Reason {
             Reason::NeedBelowThreshold { kind, .. } | Reason::RateLimited { kind, .. } => {
                 Some(*kind)
             }
+            Reason::FusedWith { .. } => None,
             Reason::AppFullscreen { .. }
             | Reason::UserAway
             | Reason::DoNotDisturb
@@ -126,6 +144,9 @@ mod tests {
                 kind: NeedKind::Hydration,
                 minutes_ago: 38,
             },
+            Reason::FusedWith {
+                kinds: vec![NeedKind::Hydration, NeedKind::Movement],
+            },
             Reason::ContextUnavailable,
         ];
 
@@ -158,6 +179,13 @@ mod tests {
             }
             .to_text(),
             "活动需求 41%，暂时不需要提醒"
+        );
+        assert_eq!(
+            Reason::FusedWith {
+                kinds: vec![NeedKind::Hydration, NeedKind::Movement]
+            }
+            .to_text(),
+            "顺带提醒喝水、活动"
         );
     }
 

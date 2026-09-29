@@ -20,6 +20,7 @@ import { useEffect, useState } from "react";
 
 import * as api from "../api";
 import { useCommand, useTacet } from "../hooks/useTacet";
+import { NeedIcon } from "../icons";
 import type { NeedKind, UpdateInfo, UserPreferences } from "../types";
 import { NEED_META } from "../types";
 import "./Settings.css";
@@ -68,7 +69,9 @@ function ReminderRow({ kind, rule, onChange }: ReminderRowProps) {
   return (
     <div className="setting-row setting-row-reminder">
       <div className="reminder-head">
-        <div className={`tile tile-${meta.category}`}>{meta.icon}</div>
+        <div className={`tile tile-${meta.category}`}>
+          <NeedIcon kind={kind} />
+        </div>
 
         <div className="setting-row-body">
           <div className="setting-row-name">{meta.label}</div>
@@ -573,7 +576,10 @@ export function Settings() {
                     className="btn btn-quiet"
                     onClick={() => void api.previewReminder(kind)}
                   >
-                    {NEED_META[kind].icon} {NEED_META[kind].label}
+                    <span className="settings-preview-icon">
+                      <NeedIcon kind={kind} />
+                    </span>
+                    {NEED_META[kind].label}
                   </button>
                 ),
               )}

@@ -24,6 +24,7 @@
 
 pub mod autostart;
 pub mod commands;
+pub mod fade;
 pub mod logging;
 pub mod scheduler;
 pub mod state;

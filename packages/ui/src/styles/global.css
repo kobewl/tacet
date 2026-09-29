@@ -152,7 +152,8 @@ input[type="number"]::-webkit-outer-spin-button {
  * 所以这里把圆角交还给系统。
  */
 .settings-shell,
-.today-shell {
+.today-shell,
+.welcome-shell {
   background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
   border-radius: 0;
 }
@@ -184,15 +185,22 @@ input[type="number"]::-webkit-outer-spin-button {
 
 /* ============================================================ 按钮 */
 
+/*
+ * 按钮一律胶囊形（原型 `.btn { border-radius: 999px }`）。
+ * 圆角矩形在这套「毛玻璃 + 大留白」的界面里显得像表单控件，
+ * 胶囊更软，也和设置页里的时长胶囊是同一种语言。
+ */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   font-weight: 500;
+  letter-spacing: -0.005em;
   transition:
     background var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out),
     transform var(--duration-fast) var(--ease-out);
   white-space: nowrap;
 }
@@ -201,22 +209,33 @@ input[type="number"]::-webkit-outer-spin-button {
   transform: scale(0.98);
 }
 
-/* 主按钮：浅色实底，不抢眼但足够清楚 */
+/*
+ * 主按钮：品牌青（原型定稿的主色），不再是近乎纯黑的实底。
+ *
+ * 黑底按钮压在浅色毛玻璃上对比过猛，整屏提醒里它是最重的一块，
+ * 像一句命令；青色同样清楚，但语气是「邀请」。顶部一道内高光、
+ * 底下一圈同色柔影，让它像是浮在玻璃上，而不是印在上面。
+ */
 .btn-primary {
-  background: var(--text-primary);
+  background: linear-gradient(180deg, #127f76 0%, var(--brand) 100%);
   color: #fff;
   padding: 0 var(--space-6);
   height: 34px;
   font-size: var(--text-base);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 8px 20px -10px rgba(12, 110, 102, 0.55),
+    0 2px 6px -2px rgba(12, 110, 102, 0.3);
 }
 
 .btn-primary:hover {
-  background: #1d2126;
+  background: linear-gradient(180deg, #0f766e 0%, #0a625b 100%);
 }
 
-/* 次要按钮：透明底 + 边框 */
+/* 次要按钮：半透明白底 + 一圈细边，贴在玻璃上而不是挖一个灰洞 */
 .btn-quiet {
-  background: rgba(11, 13, 16, 0.045);
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(11, 13, 16, 0.07);
   color: var(--text-secondary);
   padding: 0 var(--space-6);
   height: 34px;
@@ -224,7 +243,7 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 
 .btn-quiet:hover {
-  background: rgba(11, 13, 16, 0.075);
+  background: rgba(255, 255, 255, 0.8);
   color: var(--text-primary);
 }
 
@@ -303,6 +322,17 @@ input[type="number"]::-webkit-outer-spin-button {
   border-radius: var(--radius-md);
   font-size: var(--text-md);
   line-height: 1;
+}
+
+.tile svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* 品牌标识的底座：比四类需求更深一档的青 */
+.tile-brand {
+  background: var(--brand-soft);
+  color: var(--brand);
 }
 
 .tile-rest {

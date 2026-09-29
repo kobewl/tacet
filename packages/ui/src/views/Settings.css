@@ -333,6 +333,16 @@
   gap: 8px;
 }
 
+.settings-preview-icon {
+  display: inline-flex;
+  color: var(--text-tertiary);
+}
+
+.settings-preview-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
 .settings-footer {
   display: flex;
   align-items: center;

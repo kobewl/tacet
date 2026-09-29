@@ -10,6 +10,7 @@ import { BreakVeil } from "./views/BreakVeil";
 import { Panel } from "./views/Panel";
 import { Settings } from "./views/Settings";
 import { Today } from "./views/Today";
+import { Welcome } from "./views/Welcome";
 
 /** 从 URL 里读出窗口类型。 */
 function readView(): string {
@@ -39,6 +40,9 @@ export function App() {
       return <Settings />;
     case "today":
       return <Today />;
+    case "welcome":
+      // 首次启动引导：只在全新安装的第一次启动时由后端打开。
+      return <Welcome />;
     case "panel":
       return <Panel />;
     default:

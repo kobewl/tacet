@@ -161,9 +161,8 @@ export const endBreak = async (): Promise<IntentRecord | null> => {
 /** 用户跳过这次休息。 */
 export const skipBreak = () => invoke<AppSnapshot>("skip_break");
 
-/** 用户延后这次提醒。 */
-export const snoozeBreak = (minutes: number) =>
-  invoke<AppSnapshot>("snooze_break", { minutes });
+/** 用户延后这次提醒。延后多久由后端按退让阶梯决定。 */
+export const snoozeBreak = () => invoke<AppSnapshot>("snooze_break");
 
 /** 切换勿扰模式。 */
 export const setDoNotDisturb = (enabled: boolean) =>
@@ -193,6 +192,9 @@ export const openSettingsWindow = () => invoke<void>("open_settings_window");
 
 /** 关闭当前窗口（Overlay 的「跳过」用它）。 */
 export const closeCurrentWindow = () => invoke<void>("close_current_window");
+
+/** 首次启动引导看完或跳过：后端记下来并收起引导窗口。 */
+export const completeOnboarding = () => invoke<void>("complete_onboarding");
 
 /**
  * 幕布（副屏遮挡层）上的用户动作 —— 请主窗口收起休息界面。
@@ -352,7 +354,10 @@ const mockSnapshot: AppSnapshot = {
       { reason: "need_below_threshold", kind: "hydration", percent: 95 },
     ],
     actions: ["喝几口水"],
+    fused: [],
   },
+  // 延后按钮的分钟数：后端按退让阶梯算好（这里模拟「第一档」）
+  snoozeMinutes: 5,
   breakRemainingSeconds: null,
   breakTotalSeconds: null,
   capabilities: [
@@ -608,6 +613,7 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     // 收到这个调用说明有人手动触发了 —— 忽略即可。
     case "open_settings_window":
     case "close_current_window":
+    case "complete_onboarding":
     case "resize_panel":
     case "dismiss_break":
       return undefined as unknown as T;

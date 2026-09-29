@@ -182,11 +182,16 @@ pub enum SettingsKey {
     BreakDurationMinutes,
     /// 延后选项（分钟数组）。
     SnoozeOptionsMinutes,
+    /// 首次启动引导是否已看过（或跳过）。
+    ///
+    /// 不属于 [`UserPreferences`]：它不是用户可调的偏好，而是一条
+    /// 「这台机器上的 Tacet 已经跟用户打过招呼」的事实，只写一次。
+    OnboardingCompleted,
 }
 
 impl SettingsKey {
     /// 全部键，用于导出与自检。
-    pub const ALL: [SettingsKey; 12] = [
+    pub const ALL: [SettingsKey; 13] = [
         SettingsKey::ReminderRestEnabled,
         SettingsKey::ReminderRestInterval,
         SettingsKey::ReminderHydrationEnabled,
@@ -199,6 +204,7 @@ impl SettingsKey {
         SettingsKey::IdleThresholdMinutes,
         SettingsKey::BreakDurationMinutes,
         SettingsKey::SnoozeOptionsMinutes,
+        SettingsKey::OnboardingCompleted,
     ];
 
     /// 数据库里的键名。
@@ -219,6 +225,7 @@ impl SettingsKey {
             SettingsKey::IdleThresholdMinutes => "general.idle_threshold_minutes",
             SettingsKey::BreakDurationMinutes => "break.duration_minutes",
             SettingsKey::SnoozeOptionsMinutes => "break.snooze_options_minutes",
+            SettingsKey::OnboardingCompleted => "general.onboarding_completed",
         }
     }
 

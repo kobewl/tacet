@@ -30,7 +30,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use tacet_context::ContextEngine;
 use tacet_core::event::EventBus;
-use tacet_core::model::BehaviorKind;
+use tacet_core::model::{BehaviorKind, SettingsKey};
 use tacet_core::model::{InterventionLevel, InterventionOutcome, NeedKind, Reason};
 use tacet_core::policy::{DecisionInput, InterventionDecision, PolicyEngine, RecentHistory};
 use tacet_core::state::{WorkClock, WorkInput, WorkState};
@@ -73,8 +73,23 @@ pub struct AppState {
     pub window_policy: WindowPolicy,
     /// 本机时区偏移（统计口径用）。
     pub offset: LocalOffset,
-    /// 最近一次决策（界面展示「为什么」）。
+    /// 最近一次决策（界面展示「为什么」）。每拍 tick 都会刷新，含静默决策。
     pub last_decision: Option<InterventionDecision>,
+    /// 用户**正在回应**的那次打扰（真正弹出来的那条决策）。
+    ///
+    /// ## 为什么不能直接用 `last_decision`
+    ///
+    /// 整屏提醒弹出后，调度线程每 10 秒照常 tick，每一拍都会把
+    /// `last_decision` 换成一条新的静默决策（「刚刚提醒过」）。
+    /// 用户在询问页上犹豫半分钟，再点「稍后」「现在休息」时，
+    /// 读到的已经不是弹给他的那一条了：领衔需求可能变了
+    /// （融合让休息提前领衔后，最高分的往往是别的需求），
+    /// 搭车名单也被清空 —— 延后档位记错了需求、护眼顺带满足落空、
+    /// 询问页上的文案和按钮在眼前跳变。
+    ///
+    /// 所以「弹给用户的是哪一条」单独存：只在真正打扰时写入，
+    /// 在用户回应（完成休息 / 跳过 / 延后 / 确认领衔需求）时清掉。
+    pub active_decision: Option<InterventionDecision>,
     /// 最近一次干预记录的 id（用户响应时要用）。
     pub last_intervention_id: Option<i64>,
     /// 最近一次真正打扰的时间（安静期判断用）。
@@ -130,6 +145,19 @@ pub struct AppState {
     /// 走计时器自己的积压逻辑就好。不设标记的话，手动暂停恢复、
     /// 短暂离开回来都会把上一段重复加一遍。
     work_resume_attempted: bool,
+
+    /// 每类需求「连续延后了几次」（下标对齐 [`NeedKind::ALL`]）。
+    ///
+    /// 喂给提醒退让：延后一次，下次的延后时长就升一档
+    /// （见 [`AppState::SNOOZE_LADDER`]）。满足需求、离开电脑、跨天都会
+    /// 清零 —— 它衡量的是「同一口气里被搁置了几次」，不是历史总账。
+    snooze_streaks: [u32; 4],
+
+    /// 延后连击计数所在的自然日（`DateWindow::day_index`）。
+    ///
+    /// 跨天清零用。惰性检查：tick 时发现日期变了就整体归零，
+    /// 不需要定时器在午夜准时醒来。
+    snooze_streak_day: Option<i64>,
 }
 
 /// 启动时清理超过保留期的原始记录（见 `tacet_storage::RETENTION_DAYS`）。
@@ -158,10 +186,46 @@ fn prune_expired_records(db: &Database) {
     }
 }
 
+/// 老用户升级上来时，替他把「首次启动引导」记为已看过。
+///
+/// 引导是给**全新安装**的人看的（路线图 v0.2.2 DoD：「全新安装首次进入时
+/// 能看到引导」）。v0.2.2 之前的版本没有这个设置键，只看键的话，
+/// 每个老用户升级后都会被当成新人再招呼一遍 —— 那是噪音。
+///
+/// 判断依据是库里有没有行为事件：用过 Tacet 的人一定留下过记录。
+/// 必须在保留策略清理**之前**调用，也必须在启动写任何事件之前调用，
+/// 否则「有没有记录」就不再能代表「是不是老用户」。
+fn settle_onboarding_for_existing_users(db: &Database) {
+    let decided = matches!(
+        SettingsRepo::get_bool(db, SettingsKey::OnboardingCompleted),
+        Ok(Some(_))
+    );
+    if decided {
+        return;
+    }
+    match EventRepo::count_all(db) {
+        Ok(count) if count > 0 => {
+            match SettingsRepo::set(
+                db,
+                SettingsKey::OnboardingCompleted,
+                &serde_json::json!(true),
+            ) {
+                Ok(()) => crate::logging::info(&format!(
+                    "首次启动引导：库里已有 {count} 条记录，按老用户处理，不再展示"
+                )),
+                Err(err) => crate::logging::warn(&format!("记录引导状态失败：{err}")),
+            }
+        }
+        Ok(_) => {}
+        Err(err) => crate::logging::warn(&format!("判断是否老用户失败：{err}")),
+    }
+}
+
 impl AppState {
     /// 建立应用状态：打开数据库、读取设置、初始化各引擎。
     pub fn new(platform: Box<dyn Platform>) -> Result<Self, StateError> {
         let db = Database::open_default()?;
+        settle_onboarding_for_existing_users(&db);
         prune_expired_records(&db);
         let prefs = SettingsRepo::load_preferences(&db)?;
 
@@ -179,6 +243,7 @@ impl AppState {
             window_policy: WindowPolicy::new(),
             offset: local_offset(),
             last_decision: None,
+            active_decision: None,
             last_intervention_id: None,
             last_interruption_at: None,
             break_ends_at: None,
@@ -188,6 +253,8 @@ impl AppState {
             last_return_at: None,
             idle_threshold_ms,
             work_resume_attempted: false,
+            snooze_streaks: [0; 4],
+            snooze_streak_day: None,
         };
 
         state.close_dangling_break(now)?;
@@ -465,6 +532,7 @@ impl AppState {
             window_policy: WindowPolicy::new(),
             offset: LocalOffset::utc(),
             last_decision: None,
+            active_decision: None,
             last_intervention_id: None,
             last_interruption_at: None,
             break_ends_at: None,
@@ -474,12 +542,36 @@ impl AppState {
             last_return_at: None,
             idle_threshold_ms: 5 * MINUTE,
             work_resume_attempted: false,
+            snooze_streaks: [0; 4],
+            snooze_streak_day: None,
         })
     }
 
     /// 用户偏好（每次都从库里读，保证与设置页的改动一致）。
     pub fn preferences(&self) -> Result<tacet_core::model::UserPreferences, StateError> {
         Ok(SettingsRepo::load_preferences(&self.db)?)
+    }
+
+    /// 这次启动要不要展示首次启动引导。
+    ///
+    /// 只看设置键：老用户在 [`AppState::new`] 里已经被
+    /// `settle_onboarding_for_existing_users` 补记为已看过。
+    pub fn onboarding_needed(&self) -> Result<bool, StateError> {
+        let done = SettingsRepo::get_bool(&self.db, SettingsKey::OnboardingCompleted)?;
+        Ok(done != Some(true))
+    }
+
+    /// 引导看完或跳过了：记下来，以后不再展示。
+    ///
+    /// 「跳过」和「看完」同样算完成 —— 引导可跳过是产品要求，
+    /// 跳过的人下次启动再被拦一次，就成了纠缠。
+    pub fn complete_onboarding(&self) -> Result<(), StateError> {
+        SettingsRepo::set(
+            &self.db,
+            SettingsKey::OnboardingCompleted,
+            &serde_json::json!(true),
+        )?;
+        Ok(())
     }
 
     /// 当前工作状态。
@@ -503,10 +595,21 @@ impl AppState {
 
         Ok(RecentHistory {
             last_intervention: InterventionRepo::last_disturbing(&self.db)?.map(|record| {
+                // 融合名单从落库的理由里还原：`Reason::FusedWith` 既是给用户
+                // 看的文案，也是冷却判断的归因依据（见该变体的说明）。
+                let fused = record
+                    .reasons
+                    .iter()
+                    .find_map(|reason| match reason {
+                        tacet_core::model::Reason::FusedWith { kinds } => Some(kinds.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
                 tacet_core::policy::InterventionRecap {
                     kind: record.kind,
                     level: record.level,
                     fired_at: record.fired_at,
+                    fused,
                 }
             }),
             last_break_completed_at: EventRepo::last_occurrence(
@@ -611,6 +714,10 @@ impl AppState {
         // 那次休息本身就是一次满足，不需要额外重置。
         if to == WorkState::Working && matches!(from, WorkState::Away | WorkState::Idle) {
             self.last_return_at = Some(now);
+            // 离开本身就是休息：休息与护眼的延后连击一并归零，
+            // 回来之后是从头计的一口气。
+            self.reset_snooze_streak(NeedKind::Rest);
+            self.reset_snooze_streak(NeedKind::EyeRest);
             crate::logging::info(&format!(
                 "用户回到电脑前（从 {}），休息类需求的计时从此刻重新起算",
                 from.as_str()
@@ -689,6 +796,9 @@ impl AppState {
     /// 是为了让调度线程决定「怎么执行」，而状态层只管「该不该执行」——
     /// 这样这个函数可以被完整地单元测试。
     pub fn tick(&mut self, now: Timestamp) -> Result<TickOutcome, StateError> {
+        // 跨天了就把延后连击归零：新的一天，退让从第一档重新开始。
+        self.roll_snooze_day_if_needed(now);
+
         // ① 采样上下文
         let context = self.context.sample(self.platform.as_ref(), now);
 
@@ -819,6 +929,7 @@ impl AppState {
 
         self.last_intervention_id = Some(id);
         self.last_interruption_at = Some(now);
+        self.active_decision = Some(decision.clone());
 
         self.bus.emit(tacet_core::event::Event::new(
             now,
@@ -836,6 +947,17 @@ impl AppState {
     pub fn log_behavior(&mut self, kind: BehaviorKind, now: Timestamp) -> Result<(), StateError> {
         EventRepo::append(&self.db, kind, "{}", now)?;
 
+        // 需求被真实满足了：延后连击归零（退让阶梯回到第一档）。
+        let satisfied = match kind {
+            BehaviorKind::WaterLogged => Some(NeedKind::Hydration),
+            BehaviorKind::ActivityLogged => Some(NeedKind::Movement),
+            BehaviorKind::EyeRestLogged => Some(NeedKind::EyeRest),
+            _ => None,
+        };
+        if let Some(need) = satisfied {
+            self.reset_snooze_streak(need);
+        }
+
         self.bus.emit(tacet_core::event::Event::new(
             now,
             tacet_core::event::EventSource::Ui,
@@ -848,23 +970,22 @@ impl AppState {
         ));
 
         // 记录行为也算「用户回应了提醒」：如果刚才有一条待响应的干预，
-        // 并且类型对得上，就把它标成已完成。
-        if let Some(id) = self.last_intervention_id.take() {
-            let matching = match kind {
-                BehaviorKind::WaterLogged => NeedKind::Hydration,
-                BehaviorKind::ActivityLogged => NeedKind::Movement,
-                BehaviorKind::EyeRestLogged => NeedKind::EyeRest,
-                _ => NeedKind::Rest,
-            };
-
-            let should_resolve = self
-                .last_decision
-                .as_ref()
-                .is_some_and(|decision| decision.kind == matching);
-
-            if should_resolve {
+        // 并且领衔需求对得上，就把它标成已完成。
+        //
+        // 对不上时**不动**那条干预：休息领衔的融合提醒上，用户先点了
+        // 搭车的「💧 喝了」，接着才点「现在休息」—— 早先这里无条件
+        // `take()` 掉 id，喝水一记，休息那条干预就再也没人认领，
+        // 永远停在「未回应」。
+        let matching = satisfied.unwrap_or(NeedKind::Rest);
+        let leads = self
+            .active_decision
+            .as_ref()
+            .is_some_and(|decision| decision.kind == matching);
+        if leads {
+            if let Some(id) = self.last_intervention_id.take() {
                 InterventionRepo::resolve(&self.db, id, InterventionOutcome::Completed, None, now)?;
             }
+            self.active_decision = None;
         }
 
         Ok(())
@@ -951,6 +1072,29 @@ impl AppState {
 
         EventRepo::append(&self.db, BehaviorKind::BreakCompleted, "{}", now)?;
 
+        // 完成休息 = 休息需求被真实满足：延后连击归零。
+        self.reset_snooze_streak(NeedKind::Rest);
+
+        // 融合归因的兑现：这次提醒若搭了护眼的车，真休息了眼睛自然也歇了，
+        // 如实补记一笔护眼。注意只有护眼能这样顺带满足 ——
+        // 替用户记一笔「喝了」「活动过了」是编造数据，那两样必须他亲手确认。
+        //
+        // 读的是 `active_decision`（弹给用户的那一条），不是 `last_decision`：
+        // 休息几分钟里 tick 早把后者换成了静默决策，搭车名单已经是空的。
+        let active = self.active_decision.take();
+        let fused_eye_rest = active
+            .as_ref()
+            .is_some_and(|decision| decision.fused.contains(&NeedKind::EyeRest));
+        if fused_eye_rest {
+            EventRepo::append(
+                &self.db,
+                BehaviorKind::EyeRestLogged,
+                "{\"fused\":true}",
+                now,
+            )?;
+            self.reset_snooze_streak(NeedKind::EyeRest);
+        }
+
         // 把最近一条未恢复的 Intent 标成已恢复，并返回给界面
         let intent = match IntentRepo::latest_unrestored(&self.db)? {
             Some(intent) => {
@@ -971,8 +1115,7 @@ impl AppState {
 
         // 完成一次休息也算回应了「休息」这个需求
         if let Some(id) = self.last_intervention_id.take() {
-            let was_rest = self
-                .last_decision
+            let was_rest = active
                 .as_ref()
                 .is_some_and(|decision| decision.kind == NeedKind::Rest);
             if was_rest {
@@ -1015,22 +1158,75 @@ impl AppState {
         }
         self.break_ends_at = None;
         self.break_planned_seconds = None;
+        self.active_decision = None;
         Ok(())
     }
 
-    /// 用户延后这次提醒。
+    /// 延后时长的退让阶梯（分钟）。
+    ///
+    /// 用户连续说「稍后」，说明现在确实不方便；同一个需求反反复复
+    /// 每几分钟弹一次，是纠缠不是关心。每延后一次升一档，
+    /// 封顶一小时 —— 到这一档还嫌吵，今天就真的不该再弹了。
+    /// 满足需求、离开电脑、跨新的一天都会回到第一档。
+    const SNOOZE_LADDER: [u32; 4] = [5, 15, 30, 60];
+
+    /// 延后连击在连击数组里的下标。
+    fn snooze_streak_index(kind: NeedKind) -> Option<usize> {
+        NeedKind::ALL.iter().position(|k| *k == kind)
+    }
+
+    /// 当前这次提醒应该提供多长的延后（分钟）。
+    ///
+    /// 依据是领衔需求的连击数。没有进行中的决策时按第一档，
+    /// 这个值同时决定界面按钮的文案（「15 分钟后再说」），
+    /// 前后端永远说同一句话。
+    pub fn offered_snooze_minutes(&self) -> u32 {
+        let streak = self
+            .active_decision
+            .as_ref()
+            .and_then(|decision| Self::snooze_streak_index(decision.kind))
+            .map(|index| self.snooze_streaks[index])
+            .unwrap_or(0);
+        Self::SNOOZE_LADDER[(streak as usize).min(Self::SNOOZE_LADDER.len() - 1)]
+    }
+
+    /// 清零某一类需求的延后连击。
+    fn reset_snooze_streak(&mut self, kind: NeedKind) {
+        if let Some(index) = Self::snooze_streak_index(kind) {
+            self.snooze_streaks[index] = 0;
+        }
+    }
+
+    /// 跨天时把所有延后连击归零（惰性检查，tick 每拍都调）。
+    fn roll_snooze_day_if_needed(&mut self, now: Timestamp) {
+        let today = tacet_storage::DateWindow::day_of(now, self.offset).day_index();
+        if self.snooze_streak_day != Some(today) {
+            self.snooze_streaks = [0; 4];
+            self.snooze_streak_day = Some(today);
+        }
+    }
+
+    /// 按退让阶梯延后当前这次提醒。
+    ///
+    /// 延后多久由后端按连击数决定（[`Self::SNOOZE_LADDER`]），
+    /// 前端按钮的文案读的是快照里的同一个值 —— 不给「界面说 5 分钟、
+    /// 实际延了 30 分钟」留口子。
     ///
     /// ## 为什么只有休息类才记 `break.snoozed` 事件
     ///
     /// 这个事件喂的是「今天休息了几次、延后了几次」那组统计。
-    /// 早上十点弹出一条「该喝水了」，用户按了「3 分钟后」——
+    /// 早上十点弹出一条「该喝水了」，用户按了「稍后再说」——
     /// 那和「休息被延后」是两回事，记进去会让休息的统计虚高。
     ///
-    /// 判断依据是**这次提醒是为了哪类需求**（`last_decision.kind`），
-    /// 而不是调用方传来的参数：延后这件事语义一致（都是「现在别烦我」），
+    /// 判断依据是**这次提醒是为了哪类需求**（`active_decision.kind`），
+    /// 而不是别的什么参数：延后这件事语义一致（都是「现在别烦我」），
     /// 区别只在记不记账。
-    pub fn snooze(&mut self, minutes: u32, now: Timestamp) -> Result<(), StateError> {
-        let is_rest = match self.last_decision.as_ref() {
+    pub fn snooze(&mut self, now: Timestamp) -> Result<(), StateError> {
+        let minutes = self.offered_snooze_minutes();
+        // 弹给用户的那一条；延后即回应，读完就清掉。
+        let active = self.active_decision.take();
+
+        let is_rest = match active.as_ref() {
             Some(decision) => decision.kind == NeedKind::Rest,
             None => true,
         };
@@ -1052,6 +1248,14 @@ impl AppState {
                 Some(minutes),
                 now,
             )?;
+        }
+
+        // 连击 +1：下一次再延后，就是阶梯的下一档。
+        if let Some(index) = active
+            .as_ref()
+            .and_then(|decision| Self::snooze_streak_index(decision.kind))
+        {
+            self.snooze_streaks[index] = self.snooze_streaks[index].saturating_add(1);
         }
 
         // 延后期间不打扰 —— 记下延后到什么时候。
@@ -2396,7 +2600,7 @@ mod tests {
         };
         let id = InterventionRepo::insert(&state.db, &decision.to_intervention(now)).expect("写入");
         state.last_intervention_id = Some(id);
-        state.last_decision = Some(decision);
+        state.active_decision = Some(decision);
 
         // 用户点了「+1 杯水」
         state
@@ -2427,7 +2631,7 @@ mod tests {
         };
         let id = InterventionRepo::insert(&state.db, &decision.to_intervention(now)).expect("写入");
         state.last_intervention_id = Some(id);
-        state.last_decision = Some(decision);
+        state.active_decision = Some(decision);
 
         // 用户记录的是「活动」，不是「喝水」——不该结算那条喝水提醒
         state
@@ -2495,7 +2699,8 @@ mod tests {
         let mut state = state();
         let now = Timestamp::now();
 
-        state.snooze(3, now).expect("延后");
+        // 第一次延后：退让阶梯第一档（5 分钟）
+        state.snooze(now).expect("延后");
 
         // 紧接着 tick：应当因为安静期而保持静默
         let outcome = state.tick(now.saturating_add_millis(30_000)).expect("tick");
@@ -2516,7 +2721,7 @@ mod tests {
         };
         let id = InterventionRepo::insert(&state.db, &decision.to_intervention(now)).expect("写入");
         state.last_intervention_id = Some(id);
-        state.last_decision = Some(decision);
+        state.active_decision = Some(decision);
 
         state.skip_break(now).expect("跳过");
 
@@ -2749,8 +2954,8 @@ mod tests {
         }
         let snoozed_at = snoozed_at.expect("第 45 分钟应当有一次提醒");
 
-        // 用户点「3 分钟后」
-        state.snooze(3, snoozed_at).expect("延后");
+        // 用户点「5 分钟后再说」（退让阶梯第一档）
+        state.snooze(snoozed_at).expect("延后");
 
         // 延后期间必须安静
         let during = snoozed_at.saturating_add_millis(MINUTE);
@@ -2760,10 +2965,10 @@ mod tests {
         );
 
         // 延后到点：必须重新开口
-        let after = snoozed_at.saturating_add_millis(3 * MINUTE + 10_000);
+        let after = snoozed_at.saturating_add_millis(5 * MINUTE + 10_000);
         assert!(
             matches!(state.tick(after).expect("tick"), TickOutcome::Intervene(_)),
-            "用户点了「3 分钟后」，3 分钟后就**必须**再提醒一次。\
+            "用户点了「5 分钟后再说」，5 分钟后就**必须**再提醒一次。\
              这是「延后」这个承诺的全部意义 —— 原来它被冷却期拦住了，\
              用户按完之后就再也等不到提醒"
         );
@@ -2782,7 +2987,7 @@ mod tests {
         let mut state = state();
 
         // 造一个「刚提醒过喝水」的现场
-        state.last_decision = Some(InterventionDecision {
+        state.active_decision = Some(InterventionDecision {
             kind: NeedKind::Hydration,
             level: InterventionLevel::FullScreen,
             reasons: vec![Reason::SinceLastHydration { minutes: 45 }],
@@ -2790,7 +2995,7 @@ mod tests {
             fused: Vec::new(),
         });
 
-        state.snooze(3, now).expect("延后");
+        state.snooze(now).expect("延后");
 
         let snoozes = EventRepo::count_in_window(
             &state.db,
@@ -2800,5 +3005,194 @@ mod tests {
         .expect("统计");
 
         assert_eq!(snoozes, 0, "喝水提醒的「稍后」不该被记成一次「休息被延后」");
+    }
+
+    /// 提醒退让：同一口气里连着延后，档位逐级拉长并封顶一小时；
+    /// 满足需求后回到第一档。连续说「稍后」不该换来更密集的弹窗。
+    #[test]
+    fn 连续延后档位逐级拉长且满足后归零() {
+        use tacet_core::model::{InterventionLevel, Reason};
+        let mut state = state();
+        let now = Timestamp::now();
+
+        let hydration = InterventionDecision {
+            kind: NeedKind::Hydration,
+            level: InterventionLevel::FullScreen,
+            reasons: vec![Reason::SinceLastHydration { minutes: 45 }],
+            actions: Vec::new(),
+            fused: Vec::new(),
+        };
+
+        // 连延五次：5 → 15 → 30 → 60 → 60（封顶）。
+        // 每一轮都是「提醒重新弹出 → 用户再点稍后」，延后会消费掉这次打扰。
+        let expected = [5u32, 15, 30, 60, 60];
+        for minutes in expected {
+            state.active_decision = Some(hydration.clone());
+            assert_eq!(state.offered_snooze_minutes(), minutes);
+            state.snooze(now).expect("延后");
+        }
+
+        // 下一次喝水提醒弹出来，先确认档位还挂在封顶那一档
+        state.active_decision = Some(hydration);
+        assert_eq!(state.offered_snooze_minutes(), 60);
+
+        // 喝水这件事真实发生了：连击清零，回到第一档
+        state
+            .log_behavior(BehaviorKind::WaterLogged, now)
+            .expect("记录喝水");
+        state.active_decision = Some(InterventionDecision {
+            kind: NeedKind::Hydration,
+            level: InterventionLevel::FullScreen,
+            reasons: Vec::new(),
+            actions: Vec::new(),
+            fused: Vec::new(),
+        });
+        assert_eq!(
+            state.offered_snooze_minutes(),
+            5,
+            "需求被满足后退让应回到第一档"
+        );
+    }
+
+    /// 融合归因的兑现：这次提醒若搭了护眼的车，完成休息时护眼顺带满足。
+    /// 喝水/活动不在其列 —— 它们必须用户亲手确认，不能代记。
+    #[test]
+    fn 融合提醒搭车的护眼随休息完成顺带满足() {
+        use tacet_core::model::{InterventionLevel, Reason};
+        use tacet_storage::repo::EventRepo;
+
+        let mut state = state();
+        let now = Timestamp::now();
+
+        state.active_decision = Some(InterventionDecision {
+            kind: NeedKind::Rest,
+            level: InterventionLevel::FullScreen,
+            reasons: vec![Reason::FusedWith {
+                kinds: vec![NeedKind::EyeRest, NeedKind::Hydration],
+            }],
+            actions: Vec::new(),
+            fused: vec![NeedKind::EyeRest, NeedKind::Hydration],
+        });
+
+        state.finish_break(now).expect("完成休息");
+
+        let eye_logs = EventRepo::count_in_window(
+            &state.db,
+            BehaviorKind::EyeRestLogged,
+            &tacet_storage::DateWindow::day_of(now, state.offset),
+        )
+        .expect("统计");
+        assert_eq!(eye_logs, 1, "搭车的护眼应随休息完成如实记一笔");
+    }
+
+    /// 融合名单的落库与还原：带 `FusedWith` 理由的干预记录，
+    /// 读回 RecentHistory 时搭车需求要能被认出来（供冷却判断用）。
+    #[test]
+    fn 融合名单落库后能被还原进最近历史() {
+        use tacet_core::model::{InterventionLevel, Reason};
+        use tacet_storage::repo::InterventionRepo;
+
+        let state = state();
+        let now = Timestamp::now();
+
+        let decision = InterventionDecision {
+            kind: NeedKind::Rest,
+            level: InterventionLevel::FullScreen,
+            reasons: vec![Reason::FusedWith {
+                kinds: vec![NeedKind::Hydration, NeedKind::Movement],
+            }],
+            actions: Vec::new(),
+            fused: vec![NeedKind::Hydration, NeedKind::Movement],
+        };
+        InterventionRepo::insert(&state.db, &decision.to_intervention(now)).expect("落库");
+
+        let history = state.recent_history(now).expect("读历史");
+        let recap = history.last_intervention.expect("应有最近干预");
+        assert_eq!(recap.fused, vec![NeedKind::Hydration, NeedKind::Movement]);
+    }
+
+    /// 全新安装：要展示引导；看完（或跳过）之后不再展示。
+    #[test]
+    fn 全新安装展示引导且只展示一次() {
+        let state = state();
+        settle_onboarding_for_existing_users(&state.db);
+        assert!(state.onboarding_needed().expect("读取"));
+
+        state.complete_onboarding().expect("完成引导");
+        assert!(!state.onboarding_needed().expect("读取"));
+    }
+
+    /// 老用户升级上来：库里已有记录，不该被当成新人再招呼一遍。
+    #[test]
+    fn 老用户升级不展示引导() {
+        let state = state();
+        EventRepo::append(&state.db, BehaviorKind::WaterLogged, "{}", Timestamp::now())
+            .expect("写入");
+
+        settle_onboarding_for_existing_users(&state.db);
+        assert!(!state.onboarding_needed().expect("读取"));
+    }
+
+    /// 休息领衔的融合提醒上，先点搭车的「💧 喝了」、再去休息：
+    /// 喝水不能把休息那条干预「认领」走，休息完成时它要被正确结算。
+    #[test]
+    fn 搭车确认不抢走领衔的干预() {
+        use tacet_core::model::{InterventionLevel, InterventionOutcome};
+        use tacet_storage::repo::InterventionRepo;
+
+        let mut state = state();
+        let now = Timestamp::now();
+
+        let decision = InterventionDecision {
+            kind: NeedKind::Rest,
+            level: InterventionLevel::FullScreen,
+            reasons: Vec::new(),
+            actions: Vec::new(),
+            fused: vec![NeedKind::Hydration],
+        };
+        let id = InterventionRepo::insert(&state.db, &decision.to_intervention(now)).expect("写入");
+        state.last_intervention_id = Some(id);
+        state.active_decision = Some(decision);
+
+        state
+            .log_behavior(BehaviorKind::WaterLogged, now)
+            .expect("顺手喝水");
+        let after_water = InterventionRepo::find(&state.db, id)
+            .expect("查询")
+            .expect("存在");
+        assert_eq!(after_water.outcome, None, "喝水不该结算休息那条干预");
+
+        state.start_break(now).expect("开始休息");
+        state
+            .finish_break(now.saturating_add_millis(5 * MINUTE))
+            .expect("完成休息");
+        let after_break = InterventionRepo::find(&state.db, id)
+            .expect("查询")
+            .expect("存在");
+        assert_eq!(after_break.outcome, Some(InterventionOutcome::Completed));
+    }
+
+    /// 询问页开着时 tick 照常跑，并会刷新 `last_decision`；
+    /// 但弹给用户的那一条（延后档位、搭车名单都靠它）不能被换掉。
+    #[test]
+    fn 询问期间的tick不改写正在回应的决策() {
+        use tacet_core::model::InterventionLevel;
+
+        let mut state = state();
+        let now = Timestamp::now();
+
+        let decision = InterventionDecision {
+            kind: NeedKind::Rest,
+            level: InterventionLevel::FullScreen,
+            reasons: Vec::new(),
+            actions: Vec::new(),
+            fused: vec![NeedKind::EyeRest],
+        };
+        state.active_decision = Some(decision.clone());
+        state.last_decision = Some(decision.clone());
+
+        state.tick(now.saturating_add_millis(10_000)).expect("tick");
+
+        assert_eq!(state.active_decision, Some(decision));
     }
 }

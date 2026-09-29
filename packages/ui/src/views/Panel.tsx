@@ -18,6 +18,7 @@ import { useCallback, useEffect, useRef } from "react";
 
 import * as api from "../api";
 import { useCommand, useTacet } from "../hooks/useTacet";
+import { IconBrand, NeedIcon } from "../icons";
 import {
   NEED_META,
   formatDuration,
@@ -62,7 +63,11 @@ function NeedCard({
       : Math.max(0, intervalMinutes - minutesAgo);
 
   const isDone = minutesAgo !== null && score < 0.2;
-  const isDue = score >= 0.75;
+  // 「该提醒了」的文案和卡片的强调样式必须用同一个判断 ——
+  // 早先样式只看分数，文案还看倒计时，于是两张都写着「该提醒了」的卡
+  // 一张有强调、一张没有。
+  const isDue =
+    minutesAgo !== null && !isDone && (score >= 0.75 || remainingMinutes < 1);
 
   let status: string;
   if (!enabled) {
@@ -71,7 +76,7 @@ function NeedCard({
     status = `${formatDurationShort(intervalMinutes)}后提醒`;
   } else if (isDone) {
     status = `${formatDuration(minutesAgo)}前`;
-  } else if (isDue || remainingMinutes < 1) {
+  } else if (isDue) {
     // 需求分数到了，或者倒计时走完了 —— 都是该开口的时候
     status = "该提醒了";
   } else {
@@ -104,7 +109,9 @@ function NeedCard({
         }
       }}
     >
-      <div className={`tile tile-${meta.category}`}>{meta.icon}</div>
+      <div className={`tile tile-${meta.category}`}>
+        <NeedIcon kind={kind} />
+      </div>
 
       <div className="need-card-body">
         <div className="need-card-name">
@@ -223,8 +230,8 @@ export function Panel() {
       {/* 状态头 */}
       <header className="panel-header">
         <div className="panel-brand">
-          <div className="tile tile-rest panel-logo" aria-hidden>
-            ♪
+          <div className="tile tile-brand panel-logo" aria-hidden>
+            <IconBrand />
           </div>
           <div className="panel-title">Tacet</div>
           {snapshot.doNotDisturb ? (

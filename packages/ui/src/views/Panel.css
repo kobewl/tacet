@@ -40,7 +40,11 @@
   width: 30px;
   height: 30px;
   border-radius: 10px;
-  font-size: 15px;
+}
+
+.panel-logo svg {
+  width: 16px;
+  height: 16px;
 }
 
 .panel-title {
@@ -67,10 +71,11 @@
   flex: 0 0 auto;
 }
 
+/* 「连续工作」这类小标签：原来用 quaternary，压在毛玻璃上几乎看不见 */
 .panel-headline-label {
   font-size: 10px;
   font-weight: 600;
-  color: var(--text-quaternary);
+  color: var(--text-tertiary);
 }
 
 .panel-headline-value {
@@ -116,17 +121,27 @@
   color: var(--accent-done);
 }
 
-/* 快到点的卡：左侧一条细提示条 */
-.need-card-due::after {
+/*
+ * 该提醒了的卡：状态字换成深一点的中性色，前面一颗小圆点。
+ *
+ * 早先是卡片左缘一条 2px 竖线 —— 贴着图标底座，看上去像渲染残影，
+ * 而不是「快到点了」。圆点跟着文字走，读得出是状态。
+ * 不用红橙：到点不是警报（见 tokens.css 的配色原则）。
+ */
+.need-card-due .need-card-status {
+  color: var(--accent-neutral);
+  font-weight: 500;
+}
+
+.need-card-due .need-card-status::before {
   content: "";
-  position: absolute;
-  left: 0;
-  top: 14px;
-  bottom: 14px;
-  width: 2px;
-  border-radius: 0 2px 2px 0;
-  background: var(--accent-neutral);
-  opacity: 0.45;
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--brand);
+  vertical-align: 0.12em;
 }
 
 .need-card {

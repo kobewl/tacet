@@ -38,6 +38,7 @@ export type Reason =
   | { reason: "do_not_disturb" }
   | { reason: "need_below_threshold"; kind: NeedKind; percent: number }
   | { reason: "rate_limited"; kind: NeedKind; minutes_ago: number }
+  | { reason: "fused_with"; kinds: NeedKind[] }
   | { reason: "context_unavailable" };
 
 /** 一次决策的结果。对应 `tacet_core::policy::InterventionDecision`。 */
@@ -46,6 +47,8 @@ export interface Decision {
   level: InterventionLevel;
   reasons: Reason[];
   actions: string[];
+  /** 这次提醒顺带捎上的需求（Reminder Fusion，v0.2.2 起）。 */
+  fused: NeedKind[];
 }
 
 /** 四类需求的当前强度（0~1）。 */
@@ -168,6 +171,14 @@ export interface AppSnapshot {
   pendingIntent: IntentRecord | null;
   /** 最近一次决策（用于展示「为什么」）。 */
   lastDecision: Decision | null;
+  /**
+   * 延后按钮该显示多少分钟（后端按退让阶梯算好）。
+   *
+   * 同一类需求连着延后，档位会逐级拉长（5 → 15 → 30 → 60 封顶）；
+   * 满足需求、离开电脑、跨新的一天都会回到第一档。前端只负责
+   * 把这个数字印在按钮上，延后时长以它为准。
+   */
+  snoozeMinutes: number;
   /** 当前正在休息时，剩余多少秒。 */
   breakRemainingSeconds: number | null;
   /**
@@ -240,14 +251,16 @@ export type TacetEvent =
   | { type: "breakShown" };
 
 /** 需求类型的显示元数据。 */
-export const NEED_META: Record<
-  NeedKind,
-  { label: string; icon: string; category: string }
-> = {
-  rest: { label: "休息", icon: "☕", category: "rest" },
-  hydration: { label: "喝水", icon: "💧", category: "water" },
-  movement: { label: "活动", icon: "🧍", category: "move" },
-  eyeRest: { label: "护眼", icon: "👁", category: "eye" },
+/**
+ * `category` 就是图标底座的配色类后缀（`.tile-${category}`，见 global.css）。
+ * 早先写的是 water / move，而样式表里只有 tile-hydration / tile-movement ——
+ * 喝水和活动的图标底座一直是光秃秃的，没有配色。图标见 `icons.tsx`。
+ */
+export const NEED_META: Record<NeedKind, { label: string; category: string }> = {
+  rest: { label: "休息", category: "rest" },
+  hydration: { label: "喝水", category: "hydration" },
+  movement: { label: "活动", category: "movement" },
+  eyeRest: { label: "护眼", category: "eye" },
 };
 
 /** 干预等级的显示名。 */
@@ -270,7 +283,6 @@ export const LEVEL_LABELS: Record<InterventionLevel, string> = {
  */
 export function needMeta(kind: string): {
   label: string;
-  icon: string;
   category: string;
 } {
   const direct = NEED_META[kind as NeedKind];
@@ -278,7 +290,7 @@ export function needMeta(kind: string): {
   const camel = kind.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
   const normalized = NEED_META[camel as NeedKind];
   if (normalized) return normalized;
-  return { label: kind, icon: "❔", category: "other" };
+  return { label: kind, category: "other" };
 }
 
 /** 把一条决策依据渲染成给用户看的一句话。 */
@@ -304,6 +316,10 @@ export function reasonText(reason: Reason): string {
       return `${needMeta(reason.kind).label}需求 ${reason.percent}%，暂时不需要提醒`;
     case "rate_limited":
       return `${reason.minutes_ago} 分钟前刚提醒过${needMeta(reason.kind).label}`;
+    case "fused_with": {
+      if (reason.kinds.length === 0) return "这次提醒合并了多项需求";
+      return `顺带提醒${reason.kinds.map((kind) => needMeta(kind).label).join("、")}`;
+    }
     case "context_unavailable":
       return "暂时读不到上下文，按基础规则处理";
   }
