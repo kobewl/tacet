@@ -109,18 +109,19 @@ function NeedCard({
         }
       }}
     >
-      <div className={`tile tile-${meta.category}`}>
-        <NeedIcon kind={kind} />
-      </div>
-
-      <div className="need-card-body">
-        <div className="need-card-name">
-          {meta.label}
-          {enabled && onAction ? (
-            <span className="need-card-action">{actionLabel}</span>
-          ) : null}
+      <div className="need-card-top">
+        <div className={`tile tile-${meta.category}`}>
+          <NeedIcon kind={kind} />
         </div>
+        <div className="need-card-name">{meta.label}</div>
+      </div>
+      <div className="need-card-body">
         <div className="need-card-status numeric">{status}</div>
+        {enabled && onAction ? (
+          <span className="need-card-action">
+            {actionLabel} <span aria-hidden>↗</span>
+          </span>
+        ) : null}
       </div>
     </div>
   );
@@ -240,14 +241,38 @@ export function Panel() {
             </span>
           ) : null}
         </div>
-
-        <div className="panel-headline">
-          <div className="panel-headline-label">{headline.label}</div>
-          <div className="panel-headline-value numeric">{headline.value}</div>
-        </div>
+        <span className="panel-header-caption">给工作留一点空隙</span>
       </header>
 
-      <hr className="hair" />
+      <section className="panel-headline" aria-label={headline.label}>
+        <div className="panel-headline-label">{headline.label}</div>
+        <div className="panel-headline-value numeric">
+          {headline.value
+            .split(/(\d+)/)
+            .filter(Boolean)
+            .map((part, index) => (
+              <span
+                key={index}
+                className={
+                  /^\d+$/.test(part)
+                    ? "panel-time-number"
+                    : /\d/.test(headline.value)
+                      ? "panel-time-unit"
+                      : undefined
+                }
+              >
+                {part}
+              </span>
+            ))}
+        </div>
+        <div className="panel-headline-hint">
+          {state === "breaking"
+            ? "放松一下，时间留给自己。"
+            : state === "away"
+              ? "按自己的节奏，随时继续。"
+              : "专注之余，也照顾一下自己。"}
+        </div>
+      </section>
 
       {/* 四类健康状态 */}
       <div className="panel-grid">

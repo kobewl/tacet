@@ -1,17 +1,11 @@
-/**
- * 菜单栏主面板的样式。
- *
- * 面板尺寸参照原型：376px 宽。这个宽度的依据是四张卡片两列布局后
- * 每张约 172px —— 刚好放得下「距提醒 18 分钟」这样的文案而不换行。
- */
-
+/* Compact menu-bar panel: a clear timer, four quiet cards, one main action. */
 .panel-shell {
   width: 100%;
-  height: 100%;
+  height: auto;
   display: flex;
   flex-direction: column;
-  /* 右上角收窄一点，视觉上「挂」在菜单栏下面 */
-  border-top-right-radius: 8px;
+  background: #f7f6f3;
+  border-radius: 20px;
 }
 
 .panel-loading {
@@ -19,117 +13,171 @@
   text-align: center;
 }
 
-/* ============================================================ 状态头 */
-
 .panel-header {
   display: flex;
   align-items: center;
-  padding: 18px 20px 15px;
-  flex: 0 0 auto;
+  gap: 10px;
+  padding: 22px 24px 0;
 }
 
 .panel-brand {
-  flex: 1;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   min-width: 0;
 }
 
 .panel-logo {
-  width: 30px;
-  height: 30px;
-  border-radius: 10px;
+  width: 24px;
+  height: 24px;
+  border-radius: 0;
+  background: transparent;
+  color: var(--accent-highlight);
 }
 
 .panel-logo svg {
-  width: 16px;
-  height: 16px;
+  width: 17px;
+  height: 17px;
 }
 
 .panel-title {
-  font-size: var(--text-lg);
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 23px;
+  font-weight: 400;
+  letter-spacing: -.04em;
+}
+
+.panel-header-caption {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 10px;
+  letter-spacing: .06em;
 }
 
 .panel-dnd {
   font-size: 10px;
-  font-weight: 600;
-  color: var(--accent-neutral);
-  background: rgba(74, 82, 89, 0.09);
-  border-radius: var(--radius-full);
-  padding: 2px 7px;
-  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  background: var(--surface-active);
+  border-radius: 6px;
+  padding: 2px 5px;
+  white-space: nowrap;
 }
 
 .panel-headline {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  line-height: 1.15;
-  flex: 0 0 auto;
+  padding: 30px 24px 26px;
 }
 
-/* 「连续工作」这类小标签：原来用 quaternary，压在毛玻璃上几乎看不见 */
 .panel-headline-label {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 .panel-headline-value {
-  font-size: 21px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  color: var(--brand);
-  margin-top: 3px;
+  margin-top: 9px;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 28px;
+  line-height: 1.15;
+  font-weight: 400;
+  letter-spacing: -.03em;
+  color: var(--text-primary);
 }
 
-/* ============================================================ 四类状态 */
+.panel-time-number {
+  font-size: 54px;
+  font-weight: 350;
+  letter-spacing: -.06em;
+}
+
+.panel-time-unit {
+  font-size: 14px;
+  color: var(--text-secondary);
+  letter-spacing: 0;
+}
+
+.panel-headline-hint {
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
 
 .panel-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
-  padding: 14px;
-  flex: 0 0 auto;
+  padding: 0 20px;
 }
 
 .need-card {
   display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 13px 14px;
-  border-radius: var(--radius-lg);
-  /* 卡片比面板底稍实一点，才能从毛玻璃上「浮」起来 */
-  background: rgba(255, 255, 255, 0.62);
-  border: 1px solid rgba(255, 255, 255, 0.8);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
-  /* 内容可能溢出，这里给一个最小高度保证四张卡对齐 */
-  min-height: 58px;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px 14px 11px;
+  min-width: 0;
+  border-radius: 12px;
+  background: #fcfbf9;
+  border: 1px solid var(--border-soft);
+  box-shadow: none;
+  transition: background var(--duration-fast), border-color var(--duration-fast), box-shadow var(--duration-fast);
 }
 
-/* 已达标的卡：换成很淡的绿，一眼能扫出「这几项今天ok了」 */
+.need-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.need-card .tile {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+}
+
+.need-card-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.need-card-body {
+  min-width: 0;
+}
+
+.need-card-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.need-card-action {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.need-card-action span {
+  font-size: 14px;
+  opacity: .55;
+}
+
 .need-card-done {
-  background: var(--accent-done-soft);
+  background: #f2f3ee;
   border-color: var(--accent-done-border);
-  box-shadow: none;
 }
 
 .need-card-done .need-card-status {
   color: var(--accent-done);
 }
 
-/*
- * 该提醒了的卡：状态字换成深一点的中性色，前面一颗小圆点。
- *
- * 早先是卡片左缘一条 2px 竖线 —— 贴着图标底座，看上去像渲染残影，
- * 而不是「快到点了」。圆点跟着文字走，读得出是状态。
- * 不用红橙：到点不是警报（见 tokens.css 的配色原则）。
- */
+.need-card-due {
+  border-color: rgba(154, 128, 85, .26);
+}
+
 .need-card-due .need-card-status {
-  color: var(--accent-neutral);
+  color: var(--brand);
   font-weight: 500;
 }
 
@@ -140,92 +188,68 @@
   height: 5px;
   margin-right: 5px;
   border-radius: 50%;
-  background: var(--brand);
-  vertical-align: 0.12em;
+  background: var(--accent-highlight);
+  vertical-align: .12em;
 }
 
-.need-card {
-  position: relative;
+.need-card.card-interactive:hover {
+  background: white;
+  border-color: rgba(154,128,85,.32);
+  box-shadow: 0 3px 10px rgba(53,47,38,.035);
 }
-
-.need-card-body {
-  min-width: 0;
-  line-height: 1.35;
-}
-
-.need-card-name {
-  font-size: 13.5px;
-  font-weight: 500;
-  color: #20262d;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* 卡片上那个小动作标签（「+1 杯」「打卡」）——
-   平时很淡，鼠标悬停到卡片上才明显起来，避免面板显得吵闹。 */
-.need-card-action {
-  font-size: 10px;
-  font-weight: 500;
-  color: var(--brand);
-  background: var(--brand-soft);
-  border-radius: var(--radius-full);
-  padding: 1px 6px;
-  opacity: 0;
-  transition: opacity var(--duration-fast) var(--ease-out);
-  white-space: nowrap;
-}
-
-.need-card:hover .need-card-action,
-.need-card:focus-visible .need-card-action {
-  opacity: 1;
-}
-
-.need-card-status {
-  margin-top: 1px;
-  font-size: var(--text-sm);
-  color: #8c939b;
-}
-
-/* ============================================================ 操作区 */
 
 .panel-actions {
   display: flex;
   flex-direction: column;
-  gap: 9px;
-  padding: 4px 14px 16px;
-  flex: 0 0 auto;
+  gap: 8px;
+  padding: 20px 20px 16px;
 }
 
 .panel-main-action {
   width: 100%;
-  height: 42px;
-  font-size: 14.5px;
+  height: 44px;
+  font-size: 14px;
+  border-radius: 10px;
+  letter-spacing: .04em;
 }
 
 .panel-sub-actions {
   display: flex;
-  gap: 9px;
+  gap: 8px;
 }
 
 .panel-sub-action {
   flex: 1;
-  height: 38px;
-  background: rgba(11, 13, 16, 0.03);
+  height: 33px;
+  font-size: 12px;
+  border-radius: 10px;
 }
-
-/* ============================================================ 底部 */
 
 .panel-footer {
   display: flex;
   align-items: center;
-  gap: 2px;
-  padding: 10px 14px 12px;
-  flex: 0 0 auto;
-  margin-top: auto;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 12px 10px;
 }
 
 .panel-footer-dot {
-  color: #d2d8dd;
-  font-size: var(--text-sm);
+  color: #c8c3b9;
+  font-size: 12px;
+}
+
+@media (max-width: 340px) {
+  .panel-header-caption {
+    display: none;
+  }
+  .panel-time-number {
+    font-size: 46px;
+  }
+  .panel-grid {
+    gap: 8px;
+    padding: 0 12px;
+  }
+  .need-card {
+    padding: 12px 10px;
+  }
 }

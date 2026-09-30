@@ -119,18 +119,7 @@ input[type="number"]::-webkit-outer-spin-button {
   overflow: hidden;
 }
 
-/**
- * 主面板（菜单栏下拉）的底比其它窗口更透。
- *
- * 原因：它是唯一一个**背后真有原生材质**的窗口（配置里的
- * `windowEffects: { effects: ["popover"] }`）。那层材质本身已经提供了
- * 模糊和系统级的白度，CSS 再叠太厚的白会让面板糊成一块白板、白白浪费材质。
- *
- * 注意这个 0.4 **不能**照搬到别的窗口：没有材质垫底时它就是 60% 透明。
- */
-.panel-shell {
-  background: rgba(255, 255, 255, 0.4);
-}
+/* The menu-bar panel sets its porcelain background in Panel.css. */
 
 /**
  * 设置页 / 今日记录 —— 自己把地基画实。
@@ -154,7 +143,7 @@ input[type="number"]::-webkit-outer-spin-button {
 .settings-shell,
 .today-shell,
 .welcome-shell {
-  background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+  background: #f6f5f2;
   border-radius: 0;
 }
 
@@ -209,27 +198,21 @@ input[type="number"]::-webkit-outer-spin-button {
   transform: scale(0.98);
 }
 
-/*
- * 主按钮：品牌青（原型定稿的主色），不再是近乎纯黑的实底。
- *
- * 黑底按钮压在浅色毛玻璃上对比过猛，整屏提醒里它是最重的一块，
- * 像一句命令；青色同样清楚，但语气是「邀请」。顶部一道内高光、
- * 底下一圈同色柔影，让它像是浮在玻璃上，而不是印在上面。
- */
+/* A graphite primary action with a subtle surface highlight. */
 .btn-primary {
-  background: linear-gradient(180deg, #127f76 0%, var(--brand) 100%);
+  background: linear-gradient(180deg, #41403b 0%, var(--brand) 100%);
   color: #fff;
   padding: 0 var(--space-6);
   height: 34px;
   font-size: var(--text-base);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    0 8px 20px -10px rgba(12, 110, 102, 0.55),
-    0 2px 6px -2px rgba(12, 110, 102, 0.3);
+    0 8px 20px -10px rgba(37, 34, 29, 0.22),
+    0 2px 6px -2px rgba(37, 34, 29, 0.12);
 }
 
 .btn-primary:hover {
-  background: linear-gradient(180deg, #0f766e 0%, #0a625b 100%);
+  background: linear-gradient(180deg, #34332f 0%, #272622 100%);
 }
 
 /* 次要按钮：半透明白底 + 一圈细边，贴在玻璃上而不是挖一个灰洞 */
@@ -357,7 +340,7 @@ input[type="number"]::-webkit-outer-spin-button {
 /* 小号全大写标签，用于分区标题 */
 .kicker {
   font-size: var(--text-xs);
-  letter-spacing: var(--tracking-kicker);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-quaternary);
   font-weight: 500;

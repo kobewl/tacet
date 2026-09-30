@@ -1,31 +1,18 @@
 /**
- * 设计令牌 —— 界面的「物理常数」。
- *
- * 这些值来自 `docs/design/prototype-v0.1/` 里那 11 屏原型。
- * 原型是用 Python 生成 HTML 的，这里把它们固化成 CSS 变量，
- * 好处是改一处就全局生效，而且「哪些值是设计决定」变得一目了然。
- *
- * ## 三条设计原则（都体现在下面的取值里）
- *
- * 1. **安静是默认状态**：大面积的灰白、低对比的边框、克制的留白。
- *    界面不出现「系统在盯着你」的压迫感。
- * 2. **主色是水青系冷色**：取自「喝水 / 放松」的语义，
- *    不用红色系 —— 那些颜色天然带有警报意味，与「不惩罚」的产品原则冲突。
- * 3. **毛玻璃交给系统画**：`backdrop-filter` 在透明窗口上采不到桌面，
- *    真正的模糊来自 macOS 的原生材质（见文件末尾的说明）。
+ * Shared palette: warm porcelain, graphite, and a restrained champagne accent.
+ * Native window materials provide desktop blur; CSS controls contrast and hierarchy.
  */
 
 :root {
   /* -------------------------------------------------- 色彩：文字 */
-  --text-primary: #0b0d10;
-  --text-secondary: #5a626b;
-  --text-tertiary: #8a929a;
-  --text-quaternary: #aeb5bc;
-  --text-faint: #b9bfc6;
+  --text-primary: #292825;
+  --text-secondary: #706d67;
+  --text-tertiary: #807c74;
+  --text-quaternary: #89857d;
+  --text-faint: #8d8982;
 
   /* -------------------------------------------------- 色彩：背景 */
-  /* 半透明白：窗口自己撑起对比度时用的底（设置页、今日记录）。
-     主面板更薄，因为它背后有 macOS 原生材质提供白度 —— 见 `.panel-shell`。 */
+  /* Shared surfaces; each view owns its final window background. */
   --surface-base: rgba(255, 255, 255, 0.72);
   --surface-raised: rgba(255, 255, 255, 0.86);
   --surface-sunken: rgba(246, 248, 248, 0.6);
@@ -35,37 +22,38 @@
   --surface-active: rgba(11, 13, 16, 0.07);
 
   /* -------------------------------------------------- 色彩：功能 */
-  /* 品牌青 —— 取自「休息 / 放松」的语义，也是菜单栏图标的颜色。
-     整套配色里最深的那个，用于最强的强调（连续工作时长、品牌标识）。 */
-  --brand: #0c6e66;
-  --brand-soft: rgba(12, 110, 102, 0.1);
+  /* Graphite anchors the wordmark, timer, and primary action. */
+  --brand: #353430;
+  --accent-highlight: #9a8055;
+  --accent-highlight-soft: rgba(154, 128, 85, 0.10);
+  --brand-soft: rgba(53, 52, 48, 0.07);
 
-  /* 休息：青灰绿 —— 「离开屏幕，看看远处」 */
-  --accent-rest: #6f8d88;
-  --accent-rest-soft: rgba(111, 141, 136, 0.12);
-  /* 喝水：水青 */
-  --accent-water: #4a86a8;
-  --accent-water-soft: rgba(74, 134, 168, 0.12);
-  /* 活动：暖一点的青绿 */
-  --accent-move: #6d8f72;
-  --accent-move-soft: rgba(109, 143, 114, 0.12);
-  /* 护眼：雾蓝紫（刻意降了饱和度，避免长时间注视引起疲劳） */
-  --accent-eye: #6b6597;
-  --accent-eye-soft: rgba(107, 101, 151, 0.11);
+  /* Muted category colors support recognition without dominating the page. */
+  --accent-rest: #82776a;
+  --accent-rest-soft: rgba(130, 119, 106, 0.09);
+
+  --accent-water: #747c81;
+  --accent-water-soft: rgba(116, 124, 129, 0.09);
+
+  --accent-move: #797d70;
+  --accent-move-soft: rgba(121, 125, 112, 0.09);
+
+  --accent-eye: #817b85;
+  --accent-eye-soft: rgba(129, 123, 133, 0.09);
 
   /* 已完成 / 已达标 —— 用绿色而不是勾选图标，
      图标会显得像「任务」，颜色更像「状态」 */
-  --accent-done: #34855c;
-  --accent-done-soft: rgba(52, 133, 92, 0.055);
-  --accent-done-border: rgba(52, 133, 92, 0.16);
+  --accent-done: #657160;
+  --accent-done-soft: rgba(101, 113, 96, 0.045);
+  --accent-done-border: rgba(101, 113, 96, 0.15);
 
   /* 需要吸引注意但不想制造焦虑时用的中性强调色 */
-  --accent-neutral: #4a5259;
+  --accent-neutral: #70685a;
 
   /* -------------------------------------------------- 色彩：边框与分隔 */
-  --border-hair: rgba(11, 13, 16, 0.08);
-  --border-soft: rgba(11, 13, 16, 0.06);
-  --border-strong: rgba(11, 13, 16, 0.14);
+  --border-hair: rgba(53, 47, 38, 0.10);
+  --border-soft: rgba(53, 47, 38, 0.07);
+  --border-strong: rgba(53, 47, 38, 0.18);
 
   /* -------------------------------------------------- 字体 */
   /* 跟随系统字体：macOS 上就是 San Francisco，这是「原生感」的来源 */
