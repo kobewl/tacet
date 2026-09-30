@@ -260,10 +260,9 @@ export function BreakFlow() {
     await api.closeCurrentWindow();
   }, []);
 
-  const handleSnooze = useCallback(async () => {
+  const handleSnooze = useCallback(async (minutes: number) => {
     setAutoRestSeconds(null);
-    // 延后多久由后端按退让阶梯决定，前端不再传数。
-    await api.snoozeBreak();
+    await api.snoozeBreak(minutes);
     await api.closeCurrentWindow();
   }, []);
 
@@ -501,7 +500,7 @@ export function BreakFlow() {
           <AskStage
             snapshot={snapshot}
             onStart={() => void handleStartBreak()}
-            onSnooze={() => void handleSnooze()}
+            onSnooze={(minutes) => void handleSnooze(minutes)}
             onSkip={() => void handleSkip()}
             autoRestSeconds={autoRestSeconds}
           />
@@ -561,7 +560,7 @@ export function BreakFlow() {
 interface AskStageProps {
   snapshot: NonNullable<ReturnType<typeof useTacet>["snapshot"]>;
   onStart: () => void;
-  onSnooze: () => void;
+  onSnooze: (minutes: number) => void;
   onSkip: () => void;
   /** 自动休息的剩余秒数；`null` 表示没有在倒计时。 */
   autoRestSeconds: number | null;
@@ -754,11 +753,15 @@ function AskStage({
         ) : null}
 
         <div className="ask-secondary">
-          {/* 延后只有一档时长：后端按「连续延后了几次」算好退让档位，
-              这里只负责把数字印出来。连着延后，下次自动更久。 */}
-          <button className="btn btn-quiet" onClick={onSnooze}>
-            {snapshot.snoozeMinutes} 分钟后再说
-          </button>
+          {[1, 3, 5].map((minutes) => (
+            <button
+              key={minutes}
+              className="btn btn-quiet"
+              onClick={() => onSnooze(minutes)}
+            >
+              {minutes} 分钟后提醒
+            </button>
+          ))}
         </div>
 
         {/* 跳过必须始终可见，且不加任何解释性文案（那会变成变相的指责） */}

@@ -333,6 +333,8 @@
 
 .ask-secondary {
   display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: 9px;
 }
 

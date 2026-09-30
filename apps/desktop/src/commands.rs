@@ -494,16 +494,21 @@ pub fn skip_break(
 
 /// 用户延后这次提醒。
 ///
-/// 延后多久由后端按退让阶梯决定（同一需求连着延后，档位就越长），
-/// 前端按钮的文案读的是快照里的同一个值 —— 不给「界面说 5 分钟、
-/// 实际延了 30 分钟」留口子。
+/// 明确选择 1、3、5 分钟时按选择执行；旧调用未传时长时保留退让阶梯。
 #[tauri::command]
-pub fn snooze_break(app: AppHandle, state: State<'_, SharedState>) -> CmdResult<serde_json::Value> {
+pub fn snooze_break(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    minutes: Option<u32>,
+) -> CmdResult<serde_json::Value> {
     let now = tacet_core::Timestamp::now();
 
     let snapshot = {
         let mut guard = AppState::lock(&state);
-        guard.snooze(now)?;
+        match minutes {
+            Some(minutes) => guard.snooze_for(minutes, now)?,
+            None => guard.snooze(now)?,
+        }
         scheduler::build_snapshot(&guard)
     };
 

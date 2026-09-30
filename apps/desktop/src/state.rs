@@ -259,7 +259,15 @@ impl AppState {
 
         state.close_dangling_break(now)?;
         state.close_dangling_work_segment()?;
+        state.restore_snooze()?;
         Ok(state)
+    }
+
+    /// 延后期限已随干预回应落库；升级重启后继续履行同一个期限。
+    fn restore_snooze(&mut self) -> Result<(), StateError> {
+        self.snooze_until =
+            InterventionRepo::latest(&self.db)?.and_then(|record| record.snooze_until());
+        Ok(())
     }
 
     /// 收尾上一次运行留下的「未闭合的休息」。
@@ -436,16 +444,26 @@ impl AppState {
     fn resume_prior_work_ms(&self, now: Timestamp) -> Result<i64, StateError> {
         const RECENT_LIMIT: u32 = 100;
         let mut boundaries: Vec<(Timestamp, BehaviorKind)> = Vec::new();
+        let mut returned_from_away = Vec::new();
         for kind in [
             BehaviorKind::WorkStarted,
             BehaviorKind::WorkPaused,
             BehaviorKind::BreakStarted,
         ] {
-            boundaries.extend(
-                EventRepo::recent_of_kind(&self.db, kind, RECENT_LIMIT)?
-                    .into_iter()
-                    .map(|row| (row.occurred_at, row.kind)),
-            );
+            let rows = EventRepo::recent_of_kind(&self.db, kind, RECENT_LIMIT)?;
+            if kind == BehaviorKind::WorkStarted {
+                for row in &rows {
+                    if serde_json::from_str::<serde_json::Value>(&row.payload)
+                        .ok()
+                        .and_then(|v| v.get("from").and_then(|v| v.as_str()).map(str::to_owned))
+                        .as_deref()
+                        == Some("away")
+                    {
+                        returned_from_away.push(row.occurred_at);
+                    }
+                }
+            }
+            boundaries.extend(rows.into_iter().map(|row| (row.occurred_at, row.kind)));
         }
         boundaries.sort_by_key(|(at, _)| *at);
 
@@ -463,6 +481,19 @@ impl AppState {
             return Ok(0);
         }
 
+        // 新版正常退出保存秒表真值，避免把早先已结束的工作段重新拼进来。
+        if let Some(row) = EventRepo::recent_of_kind(&self.db, BehaviorKind::WorkPaused, 1)?
+            .into_iter()
+            .next()
+        {
+            if let Some(ms) = serde_json::from_str::<serde_json::Value>(&row.payload)
+                .ok()
+                .and_then(|value| value.get("continuousWorkMs").and_then(|v| v.as_i64()))
+            {
+                return Ok(ms.max(0));
+            }
+        }
+
         // 从后往前，每次消费一对相邻的 (started, paused)。
         let mut chain_ms: i64 = 0;
         let mut i = boundaries.len();
@@ -474,6 +505,11 @@ impl AppState {
                 break;
             }
             chain_ms += paused_at.millis_since(started_at).max(0);
+            // 旧版记录中，明确从 Away 返回意味着秒表确实重置过。
+            // 即便事件时间差小于空闲阈值，也不能重新接上更早的一段。
+            if returned_from_away.contains(&started_at) {
+                break;
+            }
 
             // 再往前一段：中间没有显式休息、空档不超过阈值，才继续连
             if i >= 4 {
@@ -507,8 +543,18 @@ impl AppState {
     /// 不变、不会重复落库。崩溃和强杀来不及走到这里 —— 那留给
     /// 启动时的 [`Self::close_dangling_work_segment`] 按未知时长封口。
     pub fn close_work_segment_on_exit(&mut self, now: Timestamp) {
+        // Sleep 同样会累加到 now；先观测一次以在状态清零前取出真实秒表值。
+        if self.clock.state() == WorkState::Working {
+            self.clock
+                .handle(WorkInput::Observe { idle_seconds: 0 }, now);
+        }
+        let continuous_work_ms = self.clock.continuous_work_ms();
         if let Some(change) = self.clock.handle(WorkInput::Sleep, now) {
-            let payload = format!("{{\"from\":\"{}\"}}", change.from.as_str());
+            let payload = serde_json::json!({
+                "from": change.from.as_str(),
+                "continuousWorkMs": continuous_work_ms,
+            })
+            .to_string();
             if let Err(err) = EventRepo::append(&self.db, BehaviorKind::WorkPaused, &payload, now) {
                 crate::logging::warn(&format!("退出收尾写入失败（不阻断退出）：{err}"));
             }
@@ -740,12 +786,16 @@ impl AppState {
             match self.resume_prior_work_ms(now) {
                 Ok(prior) if prior > 0 => {
                     self.clock.attach_prior_continuous_ms(prior);
+                    // 重启接续工作不是一次休息，不能重新压低休息/护眼需求。
+                    self.last_return_at = None;
                     crate::logging::info(&format!(
                         "重启接上：上一段 {} 分钟的连续工作接了回来（重启空档不计入）",
                         prior / MINUTE
                     ));
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    self.snooze_until = None;
+                }
                 Err(err) => {
                     crate::logging::warn(&format!("重启接上查询失败（不影响使用）：{err}"));
                 }
@@ -1223,6 +1273,18 @@ impl AppState {
     /// 区别只在记不记账。
     pub fn snooze(&mut self, now: Timestamp) -> Result<(), StateError> {
         let minutes = self.offered_snooze_minutes();
+        self.apply_snooze(minutes, now)
+    }
+
+    /// 用户主动选择的延后时长从点击时刻起算，不改变提醒间隔。
+    pub fn snooze_for(&mut self, minutes: u32, now: Timestamp) -> Result<(), StateError> {
+        if ![1, 3, 5].contains(&minutes) {
+            return Err(StateError::InvalidSnoozeMinutes(minutes));
+        }
+        self.apply_snooze(minutes, now)
+    }
+
+    fn apply_snooze(&mut self, minutes: u32, now: Timestamp) -> Result<(), StateError> {
         // 弹给用户的那一条；延后即回应，读完就清掉。
         let active = self.active_decision.take();
 
@@ -1432,6 +1494,8 @@ fn parse_offset(text: &str) -> Option<LocalOffset> {
 /// 状态层的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
+    #[error("延后时长只能是 1、3 或 5 分钟，收到 {0}")]
+    InvalidSnoozeMinutes(u32),
     /// 存储层出错。
     #[error(transparent)]
     Storage(#[from] tacet_storage::StorageError),
@@ -2935,43 +2999,180 @@ mod tests {
     /// 都测不出这个 bug —— 它恰恰是三层叠加的产物。
     #[test]
     fn 点了几分钟后就真的会在几分钟后再提醒() {
-        use tacet_core::model::BehaviorKind;
-
-        let start = afternoon();
-        let mut state = state_with_rest_interval(start, 45);
-
-        // 记录一次完成的休息，让需求有计时起点
-        EventRepo::append(&state.db, BehaviorKind::BreakCompleted, "{}", start).expect("记录休息");
-
-        // 跑到第一次提醒
-        let mut snoozed_at = None;
-        for minute in 1..=60u32 {
-            let now = start.saturating_add_millis(minute as i64 * MINUTE);
-            if matches!(state.tick(now).expect("tick"), TickOutcome::Intervene(_)) {
-                snoozed_at = Some(now);
-                break;
+        for minutes in [1u32, 3, 5] {
+            let start = afternoon();
+            let mut state = state_with_rest_interval(start, 45);
+            EventRepo::append(&state.db, BehaviorKind::BreakCompleted, "{}", start)
+                .expect("记录休息");
+            let mut fired_at = None;
+            for minute in 1..=45 {
+                let now = start.saturating_add_millis(minute * MINUTE);
+                if matches!(state.tick(now).expect("tick"), TickOutcome::Intervene(_)) {
+                    fired_at = Some(now);
+                    break;
+                }
             }
+            assert_eq!(fired_at, Some(start.saturating_add_millis(45 * MINUTE)));
+            // 在提醒弹出 7 秒后点击，期限必须从点击时刻开始。
+            let clicked_at = fired_at.expect("45 分钟提醒").saturating_add_millis(7_000);
+            state.snooze_for(minutes, clicked_at).expect("按选择延后");
+            let deadline = clicked_at.saturating_add_millis(i64::from(minutes) * MINUTE);
+            assert_eq!(state.snooze_until, Some(deadline));
+            assert_eq!(
+                state
+                    .preferences()
+                    .expect("偏好")
+                    .reminders
+                    .rest
+                    .interval_minutes,
+                45
+            );
+            // 像真实后台一样持续采样，避免长采样空档被计时器当作离开。
+            for elapsed in (10_000..i64::from(minutes) * MINUTE).step_by(10_000) {
+                assert!(matches!(
+                    state
+                        .tick(clicked_at.saturating_add_millis(elapsed))
+                        .expect("延后期间"),
+                    TickOutcome::Quiet
+                ));
+            }
+            assert!(matches!(
+                state
+                    .tick(deadline.saturating_sub_millis(1))
+                    .expect("到期前"),
+                TickOutcome::Quiet
+            ));
+            assert!(
+                matches!(
+                    state.tick(deadline).expect("到期"),
+                    TickOutcome::Intervene(_)
+                ),
+                "选择 {minutes} 分钟就应在点击后的 {minutes} 分钟提醒"
+            );
+            assert_eq!(state.continuous_work_minutes(), 45 + minutes);
         }
-        let snoozed_at = snoozed_at.expect("第 45 分钟应当有一次提醒");
+    }
 
-        // 用户点「5 分钟后再说」（退让阶梯第一档）
-        state.snooze(snoozed_at).expect("延后");
-
-        // 延后期间必须安静
-        let during = snoozed_at.saturating_add_millis(MINUTE);
-        assert!(
-            matches!(state.tick(during).expect("tick"), TickOutcome::Quiet),
-            "延后期间不该打扰 —— 用户刚说了「等会儿」"
+    #[test]
+    fn 旧版重启恢复不合并明确离开前的工作段() {
+        let state = state();
+        let start = afternoon();
+        for (kind, at, payload) in [
+            (
+                BehaviorKind::WorkStarted,
+                start.saturating_sub_millis(7 * MINUTE),
+                "{}",
+            ),
+            (
+                BehaviorKind::WorkPaused,
+                start.saturating_sub_millis(MINUTE),
+                "{}",
+            ),
+            (BehaviorKind::WorkStarted, start, "{\"from\":\"away\"}"),
+            (
+                BehaviorKind::WorkPaused,
+                start.saturating_add_millis(45 * MINUTE),
+                "{}",
+            ),
+        ] {
+            EventRepo::append(&state.db, kind, payload, at).unwrap();
+        }
+        assert_eq!(
+            state
+                .resume_prior_work_ms(start.saturating_add_millis(45 * MINUTE + 10_000))
+                .unwrap(),
+            45 * MINUTE
         );
+    }
 
-        // 延后到点：必须重新开口
-        let after = snoozed_at.saturating_add_millis(5 * MINUTE + 10_000);
-        assert!(
-            matches!(state.tick(after).expect("tick"), TickOutcome::Intervene(_)),
-            "用户点了「5 分钟后再说」，5 分钟后就**必须**再提醒一次。\
-             这是「延后」这个承诺的全部意义 —— 原来它被冷却期拦住了，\
-             用户按完之后就再也等不到提醒"
+    #[test]
+    fn 延后后升级重启不跳时长也不丢再次提醒() {
+        let start = afternoon();
+        let mut original = state_with_rest_interval(start, 45);
+        // 更早的短工作段曾因离开结束，不能在升级时再合并进秒表。
+        EventRepo::append(
+            &original.db,
+            BehaviorKind::WorkStarted,
+            "{}",
+            start.saturating_sub_millis(7 * MINUTE),
+        )
+        .unwrap();
+        EventRepo::append(
+            &original.db,
+            BehaviorKind::WorkPaused,
+            "{}",
+            start.saturating_sub_millis(MINUTE),
+        )
+        .unwrap();
+        for second in (0..=45 * 60).step_by(10) {
+            original
+                .tick(start.saturating_add_millis(second * 1000))
+                .unwrap();
+        }
+        let clicked_at = start.saturating_add_millis(45 * MINUTE);
+        let before_click = original.continuous_work_minutes();
+        original.snooze_for(5, clicked_at).unwrap();
+        assert_eq!(
+            original.continuous_work_minutes(),
+            before_click,
+            "点击延后不能预加分钟"
         );
+        original.close_work_segment_on_exit(clicked_at.saturating_add_millis(20_000));
+
+        let mut restarted = state();
+        std::mem::swap(&mut restarted.db, &mut original.db);
+        restarted.restore_snooze().unwrap();
+        let deadline = clicked_at.saturating_add_millis(5 * MINUTE);
+        assert_eq!(restarted.snooze_until, Some(deadline));
+        let resumed_at = clicked_at.saturating_add_millis(30_000);
+        assert!(matches!(
+            restarted.tick(resumed_at).unwrap(),
+            TickOutcome::Quiet
+        ));
+        assert_eq!(
+            restarted.continuous_work_minutes(),
+            before_click,
+            "重启不能拼进早先已结束的工作段"
+        );
+        for second in (40..5 * 60).step_by(10) {
+            assert!(matches!(
+                restarted
+                    .tick(clicked_at.saturating_add_millis(second * 1000))
+                    .unwrap(),
+                TickOutcome::Quiet
+            ));
+        }
+        assert!(
+            matches!(restarted.tick(deadline).unwrap(), TickOutcome::Intervene(_)),
+            "升级后仍应在原来的五分钟期限提醒"
+        );
+    }
+
+    #[test]
+    fn 明确选择延后时长不被退让阶梯覆盖且拒绝非法值() {
+        let mut state = state();
+        let now = afternoon();
+        state.snooze_streaks[0] = 3;
+        state.active_decision = Some(InterventionDecision {
+            kind: NeedKind::Rest,
+            level: InterventionLevel::FullScreen,
+            reasons: Vec::new(),
+            actions: Vec::new(),
+            fused: Vec::new(),
+        });
+        assert_eq!(state.offered_snooze_minutes(), 60);
+        state.snooze_for(5, now).expect("明确选择覆盖默认 60 分钟");
+        let next = now.saturating_add_millis(5 * MINUTE);
+        state.snooze_for(5, next).expect("第二次仍为 5 分钟");
+        assert_eq!(
+            state.snooze_until,
+            Some(next.saturating_add_millis(5 * MINUTE))
+        );
+        let deadline = state.snooze_until;
+        for invalid in [0, 2, 15, 60, u32::MAX] {
+            assert!(state.snooze_for(invalid, next).is_err());
+            assert_eq!(state.snooze_until, deadline);
+        }
     }
 
     /// 非休息类的「稍后」不该污染休息统计。

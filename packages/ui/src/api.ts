@@ -161,8 +161,9 @@ export const endBreak = async (): Promise<IntentRecord | null> => {
 /** 用户跳过这次休息。 */
 export const skipBreak = () => invoke<AppSnapshot>("skip_break");
 
-/** 用户延后这次提醒。延后多久由后端按退让阶梯决定。 */
-export const snoozeBreak = () => invoke<AppSnapshot>("snooze_break");
+/** 从点击时刻起，按用户选择的分钟数延后这次提醒。 */
+export const snoozeBreak = (minutes: number) =>
+  invoke<AppSnapshot>("snooze_break", { minutes });
 
 /** 切换勿扰模式。 */
 export const setDoNotDisturb = (enabled: boolean) =>
@@ -558,6 +559,9 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
       return snapshot();
 
     case "snooze_break":
+      if (![1, 3, 5].includes(Number(args?.minutes))) {
+        throw new Error("延后时长只能是 1、3 或 5 分钟");
+      }
       mockSnapshot.state = "working";
       mockSnapshot.breakRemainingSeconds = null;
       mockSnapshot.breakTotalSeconds = null;

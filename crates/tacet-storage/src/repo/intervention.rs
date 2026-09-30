@@ -80,6 +80,22 @@ impl InterventionStats {
 pub struct InterventionRepo;
 
 impl InterventionRepo {
+    /// 最近一次干预，包括被延后的记录（用于恢复尚未履行的延后期限）。
+    pub fn latest(db: &Database) -> Result<Option<Intervention>> {
+        let id = {
+            let conn = db.lock();
+            conn.query_row(
+                "SELECT id FROM interventions ORDER BY fired_at DESC, id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        };
+        match id {
+            Some(id) => Self::find(db, id),
+            None => Ok(None),
+        }
+    }
     /// 记录一次提醒已发出，返回新记录的 id。
     pub fn insert(db: &Database, intervention: &Intervention) -> Result<i64> {
         let reasons = serde_json::to_string(&intervention.reasons)?;
