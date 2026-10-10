@@ -107,7 +107,10 @@ export function Today() {
         <section className="today-section">
           <div className="kicker today-section-title">照顾自己</div>
           <div className="today-grid">
-            <Stat label="喝水" value={`${today.waterCount} 次`} />
+            <Stat
+              label="喝水"
+              value={`${today.waterCount} / ${snapshot.waterGoalCups} 杯`}
+            />
             <Stat label="起身活动" value={`${today.activityCount} 次`} />
           </div>
         </section>

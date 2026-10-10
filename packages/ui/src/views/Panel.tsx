@@ -14,15 +14,18 @@
  *    不该占用注意力。
  */
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import * as api from "../api";
 import { useCommand, useTacet } from "../hooks/useTacet";
 import { IconBrand, NeedIcon } from "../icons";
 import {
   NEED_META,
+  dndRemainingText,
   formatDuration,
   formatDurationShort,
+  waterProgress,
+  type DndSpan,
   type NeedKind,
 } from "../types";
 import "./Panel.css";
@@ -127,9 +130,19 @@ function NeedCard({
   );
 }
 
+/** 勿扰的快捷选项。与托盘菜单保持同一套。 */
+const DND_CHOICES: { label: string; span: DndSpan }[] = [
+  { label: "30 分钟", span: { kind: "minutes", minutes: 30 } },
+  { label: "1 小时", span: { kind: "minutes", minutes: 60 } },
+  { label: "2 小时", span: { kind: "minutes", minutes: 120 } },
+  { label: "到明早", span: { kind: "untilMorning" } },
+];
+
 export function Panel() {
   const { snapshot, source, error } = useTacet();
   const { run, busy } = useCommand();
+  // 勿扰时长选择条是否展开
+  const [dndMenuOpen, setDndMenuOpen] = useState(false);
 
   const act = useCallback(
     (action: () => Promise<unknown>) => {
@@ -176,7 +189,7 @@ export function Panel() {
       footer.getBoundingClientRect().bottom - shell.getBoundingClientRect().top,
     );
     void api.resizePanel(height).catch(() => {});
-  }, [snapshot]);
+  }, [snapshot, dndMenuOpen]);
 
   if (source === "loading" && !snapshot) {
     return (
@@ -236,8 +249,19 @@ export function Panel() {
           </div>
           <div className="panel-title">Tacet</div>
           {snapshot.doNotDisturb ? (
-            <span className="panel-dnd" title="勿扰模式已开启">
-              勿扰
+            <span className="panel-dnd" title="勿扰模式已开启，期间不会提醒">
+              勿扰 · {dndRemainingText(snapshot.doNotDisturbUntilMs, Date.now())}
+            </span>
+          ) : snapshot.meetingDeferral ? (
+            <span
+              className="panel-dnd"
+              title="检测到麦克风被占用（会议/通话），提醒先放一放，不会丢"
+            >
+              {snapshot.meetingDeferral === "in_call" ? "会议中" : "会后缓冲"}
+            </span>
+          ) : snapshot.outsideWorkHours ? (
+            <span className="panel-dnd" title="现在不在你设定的工作时段，不会提醒">
+              非工作时段
             </span>
           ) : null}
         </div>
@@ -314,6 +338,24 @@ export function Panel() {
         />
       </div>
 
+      {/* 今日喝水目标：只展示，不催促 */}
+      <div
+        className="panel-water"
+        title={`今日喝水 ${snapshot.today.waterCount} / ${snapshot.waterGoalCups} 杯`}
+      >
+        <div className="panel-water-track" aria-hidden>
+          <div
+            className="panel-water-fill"
+            style={{
+              width: `${Math.round(waterProgress(snapshot.today.waterCount, snapshot.waterGoalCups) * 100)}%`,
+            }}
+          />
+        </div>
+        <span className="panel-water-text numeric">
+          今日 {snapshot.today.waterCount} / {snapshot.waterGoalCups} 杯
+        </span>
+      </div>
+
       {/* 操作区 */}
       <div className="panel-actions">
         {state === "breaking" ? (
@@ -354,6 +396,25 @@ export function Panel() {
 
       <hr className="hair" />
 
+      {dndMenuOpen && !snapshot.doNotDisturb ? (
+        <div className="panel-dnd-menu" role="group" aria-label="勿扰多久">
+          <span className="panel-dnd-menu-label">勿扰</span>
+          {DND_CHOICES.map((choice) => (
+            <button
+              key={choice.label}
+              className="btn btn-quiet panel-dnd-choice"
+              disabled={busy}
+              onClick={() => {
+                setDndMenuOpen(false);
+                act(() => api.setDoNotDisturb(true, choice.span));
+              }}
+            >
+              {choice.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       {/* 底部（低频入口） */}
       <footer className="panel-footer">
         <button
@@ -389,11 +450,15 @@ export function Panel() {
         <button
           className="btn btn-ghost"
           onClick={() => {
-            void api.setDoNotDisturb(!snapshot.doNotDisturb);
+            if (snapshot.doNotDisturb) {
+              act(() => api.setDoNotDisturb(false));
+            } else {
+              setDndMenuOpen((open) => !open);
+            }
           }}
           disabled={busy}
         >
-          {snapshot.doNotDisturb ? "恢复提醒" : "勿扰"}
+          {snapshot.doNotDisturb ? "恢复提醒" : "勿扰…"}
         </button>
       </footer>
     </div>

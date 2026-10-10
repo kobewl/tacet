@@ -36,6 +36,8 @@ export type Reason =
   | { reason: "app_fullscreen"; app: string }
   | { reason: "user_away" }
   | { reason: "do_not_disturb" }
+  | { reason: "in_meeting" }
+  | { reason: "outside_work_hours" }
   | { reason: "need_below_threshold"; kind: NeedKind; percent: number }
   | { reason: "rate_limited"; kind: NeedKind; minutes_ago: number }
   | { reason: "fused_with"; kinds: NeedKind[] }
@@ -129,6 +131,29 @@ export interface ReminderRule {
   intervalMinutes: number;
 }
 
+/** 工作时段。对应 `tacet_core::model::WorkHours`。分钟数是本地零点起算。 */
+export interface WorkHours {
+  enabled: boolean;
+  /** 起点，0~1439。 */
+  startMinute: number;
+  /** 终点，0~1439。 */
+  endMinute: number;
+  /** 只在周一到周五提醒。 */
+  weekdaysOnly: boolean;
+}
+
+/** 勿扰的时长选择（面板与托盘共用同一套选项）。 */
+export type DndSpan =
+  | { kind: "minutes"; minutes: number }
+  | { kind: "untilMorning" }
+  | { kind: "indefinite" };
+
+/**
+ * 会议推迟状态。`in_call`：麦克风正被占用；`settling`：刚释放，会后缓冲中。
+ * `null` 表示没有在推迟。
+ */
+export type MeetingDeferral = "in_call" | "settling" | null;
+
 /** 用户偏好。对应 `tacet_core::model::UserPreferences`。 */
 export interface UserPreferences {
   reminders: {
@@ -137,7 +162,17 @@ export interface UserPreferences {
     movement: ReminderRule;
     eyeRest: ReminderRule;
   };
+  /**
+   * 勿扰开关的当前值，**只读**：保存偏好时后端会忽略它，
+   * 勿扰只能通过 `setDoNotDisturb` 修改（带期限，避免设置页陈旧值覆盖）。
+   */
   doNotDisturb: boolean;
+  /** 会议感知：麦克风被占用时把提醒推迟到会后。 */
+  meetingAware: boolean;
+  /** 工作时段：时段外不提醒。 */
+  workHours: WorkHours;
+  /** 每日喝水目标（杯）。 */
+  waterGoalCups: number;
   idleThresholdMinutes: number;
   breakDurationMinutes: number;
   snoozeOptionsMinutes: number[];
@@ -165,8 +200,18 @@ export interface AppSnapshot {
   today: TodaySummary;
   /** 最近 7 天统计。 */
   week: WeekSummary;
-  /** 勿扰模式是否开启。 */
+  /** 勿扰模式是否实际生效（开着且没过期）。 */
   doNotDisturb: boolean;
+  /** 定时勿扰的到期时刻（毫秒时间戳）；不限时或未开启为 null。 */
+  doNotDisturbUntilMs: number | null;
+  /** 会议推迟状态；没有推迟或关闭了会议感知时为 null。 */
+  meetingDeferral: MeetingDeferral;
+  /** 当前这次提醒已连续延后的次数，只用来换更温和的文案。 */
+  snoozeStreak: number;
+  /** 每日喝水目标（杯）。 */
+  waterGoalCups: number;
+  /** 此刻是否在工作时段之外。 */
+  outsideWorkHours: boolean;
   /** 当前暂停的 Intent（如果有一条尚未恢复的）。 */
   pendingIntent: IntentRecord | null;
   /** 最近一次决策（用于展示「为什么」）。 */
@@ -309,6 +354,10 @@ export function reasonText(reason: Reason): string {
       return "你刚刚不在电脑前";
     case "do_not_disturb":
       return "勿扰模式已开启";
+    case "in_meeting":
+      return "你正在会议或通话中，提醒会推迟到会后";
+    case "outside_work_hours":
+      return "现在不在你设定的工作时段";
     case "need_below_threshold":
       return `${needMeta(reason.kind).label}需求 ${reason.percent}%，暂时不需要提醒`;
     case "rate_limited":
@@ -356,4 +405,50 @@ export function formatClock(totalSeconds: number): string {
   const minutes = Math.floor(safe / 60);
   const seconds = safe % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+/** 把一个「本地零点起的分钟数」格式化成 `HH:MM`。 */
+export function formatMinuteOfDay(minute: number): string {
+  const safe = Math.min(1439, Math.max(0, Math.floor(minute)));
+  const h = Math.floor(safe / 60);
+  const m = safe % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+/** 把 `HH:MM` 解析回分钟数；格式不对返回 null。 */
+export function parseMinuteOfDay(text: string): number | null {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(text.trim());
+  if (!match) return null;
+  const h = Number(match[1]);
+  const m = Number(match[2]);
+  if (h > 23 || m > 59) return null;
+  return h * 60 + m;
+}
+
+/** 勿扰剩余时间的人话：「还剩 25 分钟」「到 08:00」。 */
+export function dndRemainingText(untilMs: number | null, nowMs: number): string {
+  if (untilMs === null) return "直到你手动关闭";
+  const minutes = Math.max(1, Math.ceil((untilMs - nowMs) / 60_000));
+  if (minutes < 120) return `还剩 ${minutes} 分钟`;
+  const at = new Date(untilMs);
+  return `到 ${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+}
+
+/** 喝水目标的进度（0~1，封顶 1）。 */
+export function waterProgress(count: number, goal: number): number {
+  if (goal <= 0) return 0;
+  return Math.min(1, Math.max(0, count / goal));
+}
+
+/**
+ * 连续延后之后询问页上的一句话。
+ *
+ * 原则：只换文案，不换功能 —— 永远不锁屏、不禁用跳过/延后。
+ * 语气是陪伴而不是催促：不评判，不用「又」「应该」「必须」。
+ */
+export function snoozeStreakNote(streak: number): string | null {
+  if (streak <= 0) return null;
+  if (streak === 1) return null;
+  if (streak === 2) return "已经往后挪了两次，需要的话，这次可以只做一件很小的事。";
+  return "已经往后挪了好几次。想继续忙也可以，只要你自己心里有数。";
 }

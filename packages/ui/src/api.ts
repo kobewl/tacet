@@ -18,6 +18,7 @@
  */
 
 import type {
+  DndSpan,
   AppSnapshot,
   Decision,
   ExportedRecords,
@@ -165,9 +166,18 @@ export const skipBreak = () => invoke<AppSnapshot>("skip_break");
 export const snoozeBreak = (minutes: number) =>
   invoke<AppSnapshot>("snooze_break", { minutes });
 
-/** 切换勿扰模式。 */
-export const setDoNotDisturb = (enabled: boolean) =>
-  invoke<AppSnapshot>("set_do_not_disturb", { enabled });
+/**
+ * 切换勿扰模式。
+ *
+ * 不传 `span` 表示一直开到手动关闭；传了就是定时勿扰（到点自动恢复）。
+ * 关闭时忽略 `span`。
+ */
+export const setDoNotDisturb = (enabled: boolean, span?: DndSpan) =>
+  invoke<AppSnapshot>("set_do_not_disturb", {
+    enabled,
+    durationMinutes: enabled && span?.kind === "minutes" ? span.minutes : null,
+    untilMorning: enabled && span?.kind === "untilMorning" ? true : null,
+  });
 
 /** 暂停计时（v0.1 里是「我离开一会儿」）。 */
 export const pauseTracking = () => invoke<AppSnapshot>("pause_tracking");
@@ -346,6 +356,11 @@ const mockSnapshot: AppSnapshot = {
     acceptanceRate: 0.71,
   },
   doNotDisturb: false,
+  doNotDisturbUntilMs: null,
+  meetingDeferral: null,
+  snoozeStreak: 0,
+  waterGoalCups: 8,
+  outsideWorkHours: false,
   pendingIntent: null,
   lastDecision: {
     kind: "hydration",
@@ -422,6 +437,9 @@ const mockPreferences: UserPreferences = {
     eyeRest: { enabled: true, intervalMinutes: 40 },
   },
   doNotDisturb: false,
+  meetingAware: true,
+  workHours: { enabled: false, startMinute: 9 * 60, endMinute: 19 * 60, weekdaysOnly: true },
+  waterGoalCups: 8,
   idleThresholdMinutes: 5,
   breakDurationMinutes: 5,
   snoozeOptionsMinutes: [1, 3, 5],
@@ -579,7 +597,13 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
 
     // ── 勿扰 ──
     case "set_do_not_disturb":
-      mockSnapshot.doNotDisturb = argBool(args, "enabled");
+      {
+        const enabled = argBool(args, "enabled");
+        mockSnapshot.doNotDisturb = enabled;
+        const minutes = args?.durationMinutes;
+        mockSnapshot.doNotDisturbUntilMs =
+          enabled && typeof minutes === "number" ? now + minutes * 60_000 : null;
+      }
       return snapshot();
 
     // ── Intent ──
@@ -601,12 +625,12 @@ async function mockInvoke<T>(command: string, args?: Record<string, unknown>): P
     case "save_preferences": {
       const incoming = args?.preferences;
       if (incoming && typeof incoming === "object") {
-        Object.assign(mockPreferences, incoming);
+        // 与真实后端一致：保存偏好**不改勿扰**（勿扰只走 set_do_not_disturb）。
+        const { doNotDisturb: _ignored, ...rest } = incoming as UserPreferences;
+        Object.assign(mockPreferences, rest);
 
-        // 勿扰状态在快照里也有一份（面板上要显示），同步过去
-        if (typeof mockPreferences.doNotDisturb === "boolean") {
-          mockSnapshot.doNotDisturb = mockPreferences.doNotDisturb;
-        }
+        // 喝水目标在快照里也有一份（面板上要显示），同步过去
+        mockSnapshot.waterGoalCups = mockPreferences.waterGoalCups;
       }
       return undefined as unknown as T;
     }
