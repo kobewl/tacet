@@ -17,11 +17,12 @@
 //! v0.1 的实现简单：壳层每 10 秒调一次 [`ContextEngine::sample`]，
 //! 前台应用的变化由平台层的事件驱动更新（见 [`ContextEngine::observe_app`]）。
 
-use tacet_core::model::{ContextSnapshot, ForegroundApp};
+use tacet_core::model::{AppCategory, ContextSnapshot, ForegroundApp};
 use tacet_core::Timestamp;
 use tacet_platform::{Platform, PlatformError};
 
 use crate::category::classify;
+use crate::meeting::{MeetingPhase, MeetingTracker, MeetingVerdict};
 
 /// 上下文引擎。
 ///
@@ -36,6 +37,13 @@ pub struct ContextEngine {
     last_fullscreen: bool,
     /// 从上一次「全部字段都新鲜」到现在，有没有发生过采样失败。
     has_stale_data: bool,
+    /// 会议跟踪器（把麦克风占用的瞬时信号变成稳定的「该不该推迟」）。
+    meeting: MeetingTracker,
+    /// 是否启用会议感知。关着时**根本不去读麦克风状态** ——
+    /// 用户说不要，就连查询都不做，不只是不使用结果。
+    meeting_sensing: bool,
+    /// 最近一次会议判断。
+    last_meeting: MeetingVerdict,
 }
 
 impl Default for ContextEngine {
@@ -52,7 +60,32 @@ impl ContextEngine {
             last_idle_seconds: 0,
             last_fullscreen: false,
             has_stale_data: false,
+            meeting: MeetingTracker::new(),
+            meeting_sensing: true,
+            last_meeting: MeetingVerdict {
+                phase: MeetingPhase::Clear,
+                probability: 0.0,
+            },
         }
+    }
+
+    /// 开关会议感知（来自用户偏好）。
+    ///
+    /// 关掉时顺手清空跟踪器：否则用户关了又开，会沿用关掉之前的旧状态。
+    pub fn set_meeting_sensing(&mut self, enabled: bool) {
+        if self.meeting_sensing && !enabled {
+            self.meeting.reset();
+            self.last_meeting = MeetingVerdict {
+                phase: MeetingPhase::Clear,
+                probability: 0.0,
+            };
+        }
+        self.meeting_sensing = enabled;
+    }
+
+    /// 最近一次采样得出的会议阶段。
+    pub const fn meeting_phase(&self) -> MeetingPhase {
+        self.last_meeting.phase
     }
 
     /// 采集一次上下文。
@@ -89,14 +122,27 @@ impl ContextEngine {
 
         self.has_stale_data = !fresh;
 
+        // ④ 会议（麦克风占用）
+        //
+        // 读不到**不算**数据陈旧：「这台机器没有这项能力」是常态而非故障，
+        // 把它记成 stale 会让诊断页永远亮着一个没人能修的警告。
+        // 读不到时按「没占用」处理，跟踪器内部有缓冲兜底。
+        if self.meeting_sensing {
+            let mic = platform.meeting().is_microphone_in_use().ok();
+            let meeting_app_foreground = self
+                .last_app
+                .as_ref()
+                .is_some_and(|app| app.category == AppCategory::Meeting);
+            self.last_meeting = self.meeting.observe(now, mic, meeting_app_foreground);
+        }
+
         ContextSnapshot {
             sampled_at: now,
             foreground_app: self.last_app.clone(),
             idle_seconds: self.last_idle_seconds,
             fullscreen: self.last_fullscreen,
-            // v0.3 之前这两项恒为 0：会议检测与专注度建模还没做。
-            // 留着字段是为了让决策引擎的接口形状在这个版本就固定下来。
-            meeting_probability: 0.0,
+            meeting_probability: self.last_meeting.probability,
+            // 专注度建模属于后续版本，恒为 0。
             focus_probability: 0.0,
         }
     }
@@ -193,6 +239,68 @@ mod tests {
             app.category,
             AppCategory::Meeting,
             "应当根据 Bundle ID 重新分类，而不是照抄平台层的分类"
+        );
+    }
+
+    #[test]
+    fn 麦克风被占用时会议阶段为通话中() {
+        let platform = MockPlatform::new();
+        platform.control.set_microphone_in_use(true);
+
+        let mut engine = ContextEngine::new();
+        let snapshot = engine.sample(&platform, t0());
+
+        assert_eq!(engine.meeting_phase(), MeetingPhase::InCall);
+        assert!(snapshot.meeting_probability >= 0.8);
+    }
+
+    #[test]
+    fn 关掉会议感知后不再读取麦克风() {
+        let platform = MockPlatform::new();
+        platform.control.set_microphone_in_use(true);
+
+        let mut engine = ContextEngine::new();
+        engine.set_meeting_sensing(false);
+        let snapshot = engine.sample(&platform, t0());
+
+        assert_eq!(engine.meeting_phase(), MeetingPhase::Clear);
+        assert_eq!(snapshot.meeting_probability, 0.0);
+    }
+
+    #[test]
+    fn 关了又开不沿用旧的会议状态() {
+        let platform = MockPlatform::new();
+        platform.control.set_microphone_in_use(true);
+
+        let mut engine = ContextEngine::new();
+        engine.sample(&platform, t0());
+        assert_eq!(engine.meeting_phase(), MeetingPhase::InCall);
+
+        engine.set_meeting_sensing(false);
+        assert_eq!(
+            engine.meeting_phase(),
+            MeetingPhase::Clear,
+            "关掉时立即清空"
+        );
+
+        platform.control.set_microphone_in_use(false);
+        engine.set_meeting_sensing(true);
+        engine.sample(&platform, t0());
+        assert_eq!(engine.meeting_phase(), MeetingPhase::Clear);
+    }
+
+    #[test]
+    fn 平台不支持会议检测时提醒不被推迟且数据不算陈旧() {
+        let platform = MockPlatform::new();
+        platform.control.disable(Capability::MeetingDetection);
+
+        let mut engine = ContextEngine::new();
+        engine.sample(&platform, t0());
+
+        assert_eq!(engine.meeting_phase(), MeetingPhase::Clear);
+        assert!(
+            !engine.has_stale_data(),
+            "缺少会议检测能力是常态，不该被记成采样故障"
         );
     }
 
@@ -335,18 +443,20 @@ mod tests {
     }
 
     #[test]
-    fn 会议与专注概率在基线版本恒为零() {
-        // 这两个字段是给 v0.3 预留的，v0.1 必须保持为 0 ——
-        // 如果哪天有人填了假数据进来，决策引擎会基于虚构的信息做判断。
+    fn 关闭会议感知时不凭麦克风占用填会议概率() {
+        // 用户关掉会议感知，就绝不能再基于麦克风状态做任何会议判断；
+        // 专注概率目前没有任何信号来源，必须保持为 0，
+        // 否则决策引擎会基于虚构的信息做判断。
         let platform = MockPlatform::new();
         platform.control.set_microphone_in_use(true);
 
         let mut engine = ContextEngine::new();
+        engine.set_meeting_sensing(false);
         let snapshot = engine.sample(&platform, t0());
 
         assert_eq!(
             snapshot.meeting_probability, 0.0,
-            "v0.1 不做会议判断，绝不能凭麦克风占用就填一个概率"
+            "会议感知关闭时，绝不能凭麦克风占用就填一个概率"
         );
         assert_eq!(snapshot.focus_probability, 0.0);
     }

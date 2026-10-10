@@ -29,5 +29,5 @@ pub use intent::{Intent, MAX_INTENT_CHARS};
 pub use intervention::{Intervention, InterventionOutcome};
 pub use level::InterventionLevel;
 pub use need::{HealthNeeds, NeedKind, NeedScore};
-pub use prefs::{ReminderRule, ReminderSettings, SettingsKey, UserPreferences};
+pub use prefs::{ReminderRule, ReminderSettings, SettingsKey, UserPreferences, WorkHours};
 pub use reason::Reason;

@@ -9,7 +9,7 @@
 //! | [`IdleMonitor`] | 同上 | 无 |
 //! | [`WindowManager`] | AppKit `NSWorkspace` / `NSRunningApplication` | 无 |
 //! | [`ScreenManager`] | AppKit `NSScreen` | 无 |
-//! | [`MeetingDetector`] | CoreAudio 设备占用状态（v0.3） | 无 |
+//! | [`MeetingDetector`] | CoreAudio 进程级输入状态（回退：设备占用状态） | 无 |
 //! | [`NotificationService`] | 由壳层用 Tauri 通知插件实现 | 通知权限 |
 //! | [`StartupService`] | 由壳层写 LaunchAgent plist 实现（见 `startup.rs`） | 无 |
 //!
@@ -37,6 +37,8 @@
 #[cfg(target_os = "macos")]
 mod idle;
 #[cfg(target_os = "macos")]
+mod meeting;
+#[cfg(target_os = "macos")]
 mod screens;
 #[cfg(target_os = "macos")]
 mod startup;
@@ -45,6 +47,8 @@ mod window;
 
 #[cfg(target_os = "macos")]
 pub use idle::{CgActivityMonitor, CgIdleMonitor};
+#[cfg(target_os = "macos")]
+pub use meeting::{probe_microphone, MacMeetingDetector};
 #[cfg(target_os = "macos")]
 pub use screens::NSScreenManager;
 #[cfg(target_os = "macos")]
@@ -137,11 +141,11 @@ impl Platform for MacPlatform {
         // NSScreen 是公开 API。
         report.mark_available(Capability::ScreenEnumeration);
 
-        // 下面三项都由壳层负责，这里如实说明「库层不提供」：
+        // 下面两项由壳层负责，这里如实说明「库层不提供」：
         //
         // 它们有个共同点 —— 都需要**应用身份**（bundle），而纯库 crate 没有。
         // 通知要 bundle identifier 才能申请权限；开机自启要 bundle 才能
-        // 在系统里登记登录项；会议检测则单纯是 v0.3 的范围。
+        // 在系统里登记登录项。
         //
         // ## 为什么开机自启曾经标错（这里修过一次真实的错误）
         //
@@ -164,43 +168,24 @@ impl Platform for MacPlatform {
             Capability::StartupLaunch,
             "开机自启由应用壳层提供，状态存在系统的登录项里",
         );
-        report.mark_unavailable(Capability::MeetingDetection, "会议检测属于 v0.3 范围");
+
+        // 会议检测由本 crate 提供（见 `meeting.rs`）：只读 CoreAudio 的占用状态，
+        // 不录音、不要权限。探测不通过（如系统接口异常）时如实标为不可用，
+        // 上层会静默跳过「会议中推迟提醒」，不影响其它功能。
+        if meeting::capability_supported() {
+            report.mark_available(Capability::MeetingDetection);
+        } else {
+            report.mark_unavailable(
+                Capability::MeetingDetection,
+                "读取不到麦克风占用状态，「会议中推迟提醒」暂时不生效",
+            );
+        }
 
         report
     }
 
     fn name(&self) -> &'static str {
         "macos"
-    }
-}
-
-/// 会议检测的 macOS 实现。
-///
-/// ## v0.1 明确不实现
-///
-/// 平台策略 §4.4 说这项能力**不需要麦克风权限**（只查询
-/// `kAudioDevicePropertyDeviceIsRunningSomewhere` 这个设备属性，
-/// 不触碰任何音频流）。但那是 v0.3 的工作，v0.1 里它如实返回
-/// [`PlatformError::Unsupported`]。
-///
-/// ## 为什么不如实实现「返回 false」而是返回错误
-///
-/// 「麦克风没被占用」和「我检测不了」对上层是完全不同的信息：
-///
-/// - 前者会让决策引擎认为「现在适合全屏提醒」
-/// - 后者会让它走保守路径
-///
-/// 在 v0.1 里假装「没有会议」是很危险的 —— 用户真的在开会时，
-/// 系统会自信地弹一个全屏提醒盖住整个会议界面。
-/// 返回错误才是诚实的做法。
-#[derive(Default)]
-pub struct MacMeetingDetector;
-
-impl tacet_platform::MeetingDetector for MacMeetingDetector {
-    fn is_microphone_in_use(&self) -> tacet_platform::Result<bool> {
-        Err(tacet_platform::PlatformError::Unsupported(
-            Capability::MeetingDetection,
-        ))
     }
 }
 
@@ -270,21 +255,16 @@ mod tests {
     }
 
     #[test]
-    fn 会议检测明确报告不支持() {
+    fn 会议检测的能力报告与实际调用一致() {
+        // 能力报告说「可用」，调用就必须能成功；说「不可用」，就不该假装可用。
+        // 这条守的是 v0.1 修过的那类错误：报告与实际能力自相矛盾。
         let platform = MacPlatform::new();
-        let err = platform
-            .meeting()
-            .is_microphone_in_use()
-            .expect_err("v0.1 不该假装能检测会议");
-
-        assert!(err.is_degradable(), "能力缺失必须是可降级的");
-        assert!(!report_supports_meeting(&platform));
-    }
-
-    fn report_supports_meeting(platform: &MacPlatform) -> bool {
-        platform
+        let reported = platform
             .capabilities()
-            .supports(Capability::MeetingDetection)
+            .supports(Capability::MeetingDetection);
+        let actual = platform.meeting().is_microphone_in_use().is_ok();
+
+        assert_eq!(reported, actual);
     }
 
     #[test]

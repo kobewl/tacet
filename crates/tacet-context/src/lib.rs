@@ -20,16 +20,18 @@
 //! 本 crate 只负责生产它。这样决策引擎不需要依赖任何平台相关的东西 ——
 //! 测试时构造一个快照就能验证全部决策逻辑。
 //!
-//! ## v0.1 的诚实边界
+//! ## 当前的能力边界
 //!
-//! v0.1 只做三件事：前台应用、空闲、全屏。**会议概率恒为 0**，
-//! 专注概率也恒为 0 —— 它们属于 v0.3 的 Interruptibility 五因子模型。
-//!
-//! 但结构已经预留好了：快照里那两个字段一直都在，将来填上真实值即可，
-//! 决策引擎不用改一行。
+//! - v0.1：前台应用、空闲、全屏。
+//! - **v0.3：会议感知** —— 读麦克风占用（不录音、不要权限），经
+//!   [`meeting::MeetingTracker`] 防抖并加会后缓冲，得到稳定的「该不该推迟提醒」。
+//!   会议概率写进快照的 `meeting_probability`。
+//! - 专注概率仍恒为 0，属于后续版本的 Interruptibility 模型。
 
 pub mod category;
 pub mod engine;
+pub mod meeting;
 
 pub use category::classify;
 pub use engine::ContextEngine;
+pub use meeting::{MeetingPhase, MeetingTracker, MeetingVerdict};

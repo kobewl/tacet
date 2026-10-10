@@ -98,6 +98,14 @@ pub fn get_preferences(state: State<'_, SharedState>) -> CmdResult<serde_json::V
             "eyeRest": rule_json(&prefs.reminders.eye_rest),
         },
         "doNotDisturb": prefs.do_not_disturb,
+        "meetingAware": prefs.meeting_aware,
+        "workHours": {
+            "enabled": prefs.work_hours.enabled,
+            "startMinute": prefs.work_hours.start_minute,
+            "endMinute": prefs.work_hours.end_minute,
+            "weekdaysOnly": prefs.work_hours.weekdays_only,
+        },
+        "waterGoalCups": prefs.water_goal_cups,
         "idleThresholdMinutes": prefs.idle_threshold_minutes,
         "breakDurationMinutes": prefs.break_duration_minutes,
         "snoozeOptionsMinutes": prefs.snooze_options_minutes,
@@ -134,8 +142,41 @@ pub fn save_preferences(
         read_rule(reminders.get("eyeRest"), &mut prefs.reminders.eye_rest);
     }
 
-    if let Some(value) = preferences.get("doNotDisturb").and_then(|v| v.as_bool()) {
-        prefs.do_not_disturb = value;
+    // 注意：这里**刻意不读 `doNotDisturb`**。
+    //
+    // 勿扰有自己的入口（`set_do_not_disturb`，带期限）。设置页是「读出整份偏好 →
+    // 用户改几项 → 整份写回」的往返：如果这里也接收它，用户在设置页停留期间
+    // 面板里开启/到期的勿扰，会被设置页带来的陈旧值覆盖回去。
+    if let Some(value) = preferences.get("meetingAware").and_then(|v| v.as_bool()) {
+        prefs.meeting_aware = value;
+    }
+    if let Some(hours) = preferences.get("workHours") {
+        let enabled = hours
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(prefs.work_hours.enabled);
+        let read_minute = |key: &str, fallback: u32| {
+            hours
+                .get(key)
+                .and_then(|v| v.as_u64())
+                .map(|n| n.min(u32::MAX as u64) as u32)
+                .unwrap_or(fallback)
+        };
+        let weekdays_only = hours
+            .get("weekdaysOnly")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(prefs.work_hours.weekdays_only);
+        // 走构造函数，让范围夹取生效
+        prefs.work_hours = tacet_core::model::WorkHours::new(
+            enabled,
+            read_minute("startMinute", prefs.work_hours.start_minute),
+            read_minute("endMinute", prefs.work_hours.end_minute),
+            weekdays_only,
+        );
+    }
+    if let Some(value) = preferences.get("waterGoalCups").and_then(|v| v.as_u64()) {
+        let (min, max) = tacet_core::model::UserPreferences::WATER_GOAL_RANGE;
+        prefs.water_goal_cups = (value.min(u32::MAX as u64) as u32).clamp(min, max);
     }
     if let Some(value) = preferences
         .get("idleThresholdMinutes")
@@ -524,35 +565,83 @@ pub fn snooze_break(
     snapshot.ok_or_else(|| CommandError::from("无法延后提醒".to_string()))
 }
 
-/// 切换勿扰模式。
-#[tauri::command]
-pub fn set_do_not_disturb(
-    app: AppHandle,
-    state: State<'_, SharedState>,
+/// 勿扰的时长选择。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DndSpan {
+    /// 直到手动关闭。
+    Indefinite,
+    /// 持续若干分钟。
+    Minutes(u32),
+    /// 到下一个早上 8 点。
+    UntilMorning,
+}
+
+/// 「到明早」落在几点。
+const MORNING_HOUR: u32 = 8;
+
+/// 勿扰的最长分钟数（一天），防止前端传来离谱的值。
+const MAX_DND_MINUTES: u32 = 24 * 60;
+
+/// 开关勿扰并广播最新快照。命令与托盘菜单共用这一个入口。
+pub fn apply_do_not_disturb(
+    app: &AppHandle,
+    state: &SharedState,
     enabled: bool,
+    span: DndSpan,
 ) -> CmdResult<serde_json::Value> {
     let snapshot = {
-        let guard = AppState::lock(&state);
-        let mut prefs = guard.preferences()?;
-        prefs.do_not_disturb = enabled;
-        tacet_storage::repo::SettingsRepo::save_preferences(&guard.db, &prefs)?;
+        let guard = AppState::lock(state);
+        let now = tacet_core::Timestamp::now();
+        let until = match span {
+            DndSpan::Indefinite => None,
+            DndSpan::Minutes(minutes) => Some(
+                now.saturating_add_millis(i64::from(minutes.clamp(1, MAX_DND_MINUTES)) * 60_000),
+            ),
+            DndSpan::UntilMorning => {
+                Some(crate::state::next_morning(now, guard.offset, MORNING_HOUR))
+            }
+        };
+        guard.set_do_not_disturb(enabled, until)?;
         scheduler::build_snapshot(&guard)
     };
 
     // 开了勿扰就把正在显示的全屏提醒收起来 ——
     // 用户刚刚说了「别打扰我」，这时候还挂着一个全屏窗口是自相矛盾的。
     if enabled {
-        windows::hide_break_window(&app);
+        windows::hide_break_window(app);
     }
 
     if let Some(snapshot) = snapshot.clone() {
         windows::broadcast(
-            &app,
+            app,
             serde_json::json!({ "type": "snapshot", "snapshot": snapshot }),
         );
     }
 
     snapshot.ok_or_else(|| CommandError::from("无法切换勿扰模式".to_string()))
+}
+
+/// 切换勿扰模式。
+///
+/// - `duration_minutes`：定时勿扰，到点自动恢复
+/// - `until_morning`：勿扰到明早 8 点
+/// - 两者都没有：一直开到手动关闭
+#[tauri::command]
+pub fn set_do_not_disturb(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    enabled: bool,
+    duration_minutes: Option<u32>,
+    until_morning: Option<bool>,
+) -> CmdResult<serde_json::Value> {
+    let span = if until_morning == Some(true) {
+        DndSpan::UntilMorning
+    } else if let Some(minutes) = duration_minutes {
+        DndSpan::Minutes(minutes)
+    } else {
+        DndSpan::Indefinite
+    };
+    apply_do_not_disturb(&app, &state, enabled, span)
 }
 
 /// 暂停计时。

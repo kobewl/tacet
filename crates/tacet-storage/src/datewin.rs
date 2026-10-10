@@ -87,6 +87,23 @@ impl LocalOffset {
         self.minutes as i64 * MINUTE
     }
 
+    /// 某个时刻的本地「钟面」：`(自零点起的分钟数, 周几)`。
+    ///
+    /// 周几沿用周统计的口径：**0 = 周一 … 6 = 周日**。
+    /// 工作时段判断要用它 —— 「现在是不是上班时间」本质上是个本地日历问题，
+    /// 按本模块的约定，所有本地日历计算都收口在这里，别处不许自己算。
+    ///
+    /// 1970-01-01 是周四，所以周几 = (日序号 + 3) 对 7 取模。
+    pub fn clock_parts(self, at: Timestamp) -> (u32, u32) {
+        let local_ms = at.as_millis() + self.millis();
+        let day_index = local_ms.div_euclid(MS_PER_DAY);
+        let ms_of_day = local_ms.rem_euclid(MS_PER_DAY);
+
+        let minute_of_day = (ms_of_day / MINUTE) as u32;
+        let weekday = (day_index + 3).rem_euclid(7) as u32;
+        (minute_of_day, weekday)
+    }
+
     /// 界面显示形式，如 `UTC+08:00`。
     pub fn display_name(self) -> String {
         let sign = if self.minutes < 0 { '-' } else { '+' };
@@ -549,6 +566,28 @@ mod tests {
         assert_eq!(LocalOffset::from_hours(-100).minutes(), -18 * 60);
         // 中国标准时间不受影响
         assert_eq!(cst().minutes(), 480);
+    }
+
+    #[test]
+    fn 本地钟面_分钟数与周几() {
+        // 2026-09-20 是周日。UTC 12:30 在东八区是 20:30（同一天）。
+        let sunday_evening = ts("2026-09-20T12:30:00Z");
+        assert_eq!(cst().clock_parts(sunday_evening), (20 * 60 + 30, 6));
+
+        // UTC 周日 18:00 在东八区已经是周一凌晨 02:00 —— 周几必须跟着本地走。
+        let crossing = ts("2026-09-20T18:00:00Z");
+        assert_eq!(cst().clock_parts(crossing), (2 * 60, 0));
+
+        // 2026-09-21 周一，UTC 零点
+        assert_eq!(
+            LocalOffset::utc().clock_parts(ts("2026-09-21T00:00:00Z")),
+            (0, 0)
+        );
+        // 2026-09-25 周五
+        assert_eq!(
+            LocalOffset::utc().clock_parts(ts("2026-09-25T09:15:00Z")),
+            (9 * 60 + 15, 4)
+        );
     }
 
     #[test]

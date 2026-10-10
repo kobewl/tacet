@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::NeedKind;
+use crate::time::Timestamp;
 
 /// 一类提醒的配置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +111,77 @@ impl ReminderSettings {
     }
 }
 
+/// 工作时段：只在这段时间里提醒。
+///
+/// 参考 Workrave 的每日使用限额与 Stretchly 的「暂停到明早」：
+/// 下班后还开着电脑的人（刷网页、追剧、打游戏）并不需要「该休息了」——
+/// 那不是工作，而且弹窗会被当成骚扰。默认**关闭**（不替用户做决定），
+/// 打开后时段之外一律静默，计时与统计照常进行。
+///
+/// 起止都用「本地时间自零点起的分钟数」表示：`540` = 09:00。
+/// `start > end` 表示跨午夜（如 20:00~04:00 的夜班）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkHours {
+    /// 是否启用。关着时任何时刻都算「工作时段」。
+    pub enabled: bool,
+    /// 起点（本地零点起的分钟数，0~1439）。
+    pub start_minute: u32,
+    /// 终点（本地零点起的分钟数，0~1439）。
+    pub end_minute: u32,
+    /// 只在周一到周五提醒。
+    pub weekdays_only: bool,
+}
+
+impl Default for WorkHours {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            start_minute: 9 * 60,
+            end_minute: 19 * 60,
+            weekdays_only: true,
+        }
+    }
+}
+
+impl WorkHours {
+    /// 一天的最后一分钟。
+    pub const MAX_MINUTE: u32 = 24 * 60 - 1;
+
+    /// 构造并把起止夹取到合法区间。
+    pub fn new(enabled: bool, start_minute: u32, end_minute: u32, weekdays_only: bool) -> Self {
+        Self {
+            enabled,
+            start_minute: start_minute.min(Self::MAX_MINUTE),
+            end_minute: end_minute.min(Self::MAX_MINUTE),
+            weekdays_only,
+        }
+    }
+
+    /// 此刻是否处在工作时段内。
+    ///
+    /// - `local_minute`：本地时间自零点起的分钟数
+    /// - `weekday`：周几，**0 = 周一 … 6 = 周日**（与周统计口径一致）
+    ///
+    /// 未启用时恒为 `true`。起止相等视为全天（避免用户误设成「永远静默」）。
+    pub const fn contains(&self, local_minute: u32, weekday: u32) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        if self.weekdays_only && weekday >= 5 {
+            return false;
+        }
+        if self.start_minute == self.end_minute {
+            return true;
+        }
+        if self.start_minute < self.end_minute {
+            local_minute >= self.start_minute && local_minute < self.end_minute
+        } else {
+            // 跨午夜：晚于起点或早于终点都算
+            local_minute >= self.start_minute || local_minute < self.end_minute
+        }
+    }
+}
+
 /// 全部用户偏好。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserPreferences {
@@ -117,6 +189,22 @@ pub struct UserPreferences {
     pub reminders: ReminderSettings,
     /// 勿扰模式：开着的时候一律 Level 0。
     pub do_not_disturb: bool,
+    /// 勿扰的到期时刻；`None` 表示一直开到用户手动关闭。
+    ///
+    /// 参考 Stretchly 的「暂停 30 分钟 / 1 小时 / 2 小时 / 到明早」：
+    /// 永久勿扰最大的风险是**忘了关** —— 一个被遗忘的开关会让健康工具
+    /// 悄无声息地失效。定时勿扰到点自动恢复，把这个风险收掉。
+    pub do_not_disturb_until: Option<Timestamp>,
+    /// 会议感知：麦克风被占用时把提醒推迟到会后。
+    ///
+    /// 参考 LookAway 的「会议 / 通话中自动暂停」。默认开启，
+    /// 因为在会上被整屏盖住是这类工具最典型的社死场景；
+    /// 推迟不是丢弃，会后（缓冲 3 分钟）仍会补上。
+    pub meeting_aware: bool,
+    /// 工作时段（只在这段时间里提醒）。
+    pub work_hours: WorkHours,
+    /// 每日喝水目标（杯）。
+    pub water_goal_cups: u32,
     /// 多久没有输入就算「离开」（分钟），PRD §3.1 默认 5 分钟。
     pub idle_threshold_minutes: u32,
     /// 一次休息持续多久（分钟），PRD §3.2 默认 5 分钟。
@@ -130,6 +218,10 @@ impl Default for UserPreferences {
         Self {
             reminders: ReminderSettings::default(),
             do_not_disturb: false,
+            do_not_disturb_until: None,
+            meeting_aware: true,
+            work_hours: WorkHours::default(),
+            water_goal_cups: UserPreferences::DEFAULT_WATER_GOAL_CUPS,
             idle_threshold_minutes: 5,
             break_duration_minutes: 5,
             snooze_options_minutes: vec![1, 3, 5],
@@ -138,6 +230,22 @@ impl Default for UserPreferences {
 }
 
 impl UserPreferences {
+    /// 每日喝水目标的默认值（杯）。常见的「8 杯水」建议。
+    pub const DEFAULT_WATER_GOAL_CUPS: u32 = 8;
+    /// 每日喝水目标的合法区间。
+    pub const WATER_GOAL_RANGE: (u32, u32) = (1, 20);
+
+    /// 勿扰此刻是否**真的生效**：开关开着，且没有过期。
+    pub fn dnd_active(&self, now: Timestamp) -> bool {
+        if !self.do_not_disturb {
+            return false;
+        }
+        match self.do_not_disturb_until {
+            Some(until) => now < until,
+            None => true,
+        }
+    }
+
     /// 空闲阈值换算成秒（平台层的空闲检测以秒为单位）。
     pub const fn idle_threshold_seconds(&self) -> u32 {
         self.idle_threshold_minutes * 60
@@ -182,6 +290,20 @@ pub enum SettingsKey {
     BreakDurationMinutes,
     /// 延后选项（分钟数组）。
     SnoozeOptionsMinutes,
+    /// 勿扰到期时刻（毫秒时间戳；`null` 表示手动关闭前一直有效）。
+    DoNotDisturbUntil,
+    /// 会议感知开关。
+    MeetingAware,
+    /// 工作时段开关。
+    WorkHoursEnabled,
+    /// 工作时段起点（本地零点起的分钟数）。
+    WorkHoursStart,
+    /// 工作时段终点（本地零点起的分钟数）。
+    WorkHoursEnd,
+    /// 工作时段仅限工作日。
+    WorkHoursWeekdaysOnly,
+    /// 每日喝水目标（杯）。
+    WaterGoalCups,
     /// 首次启动引导是否已看过（或跳过）。
     ///
     /// 不属于 [`UserPreferences`]：它不是用户可调的偏好，而是一条
@@ -191,7 +313,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// 全部键，用于导出与自检。
-    pub const ALL: [SettingsKey; 13] = [
+    pub const ALL: [SettingsKey; 20] = [
         SettingsKey::ReminderRestEnabled,
         SettingsKey::ReminderRestInterval,
         SettingsKey::ReminderHydrationEnabled,
@@ -204,6 +326,13 @@ impl SettingsKey {
         SettingsKey::IdleThresholdMinutes,
         SettingsKey::BreakDurationMinutes,
         SettingsKey::SnoozeOptionsMinutes,
+        SettingsKey::DoNotDisturbUntil,
+        SettingsKey::MeetingAware,
+        SettingsKey::WorkHoursEnabled,
+        SettingsKey::WorkHoursStart,
+        SettingsKey::WorkHoursEnd,
+        SettingsKey::WorkHoursWeekdaysOnly,
+        SettingsKey::WaterGoalCups,
         SettingsKey::OnboardingCompleted,
     ];
 
@@ -225,6 +354,13 @@ impl SettingsKey {
             SettingsKey::IdleThresholdMinutes => "general.idle_threshold_minutes",
             SettingsKey::BreakDurationMinutes => "break.duration_minutes",
             SettingsKey::SnoozeOptionsMinutes => "break.snooze_options_minutes",
+            SettingsKey::DoNotDisturbUntil => "general.do_not_disturb_until_ms",
+            SettingsKey::MeetingAware => "context.meeting_aware",
+            SettingsKey::WorkHoursEnabled => "schedule.work_hours.enabled",
+            SettingsKey::WorkHoursStart => "schedule.work_hours.start_minute",
+            SettingsKey::WorkHoursEnd => "schedule.work_hours.end_minute",
+            SettingsKey::WorkHoursWeekdaysOnly => "schedule.work_hours.weekdays_only",
+            SettingsKey::WaterGoalCups => "goal.water_cups",
             SettingsKey::OnboardingCompleted => "general.onboarding_completed",
         }
     }
@@ -251,6 +387,83 @@ mod tests {
         assert_eq!(prefs.break_duration_minutes, 5);
         assert_eq!(prefs.snooze_options_minutes, vec![1, 3, 5]);
         assert!(!prefs.do_not_disturb);
+    }
+
+    #[test]
+    fn 新增偏好的默认值() {
+        let prefs = UserPreferences::default();
+
+        assert!(prefs.meeting_aware, "会议感知默认开启");
+        assert_eq!(prefs.do_not_disturb_until, None);
+        assert_eq!(prefs.water_goal_cups, 8);
+        assert!(
+            !prefs.work_hours.enabled,
+            "工作时段默认关闭，不替用户做决定"
+        );
+    }
+
+    #[test]
+    fn 定时勿扰到点自动失效() {
+        let now = Timestamp::from_millis(1_000_000);
+        let mut prefs = UserPreferences::default();
+
+        assert!(!prefs.dnd_active(now), "没开就是没开");
+
+        prefs.do_not_disturb = true;
+        assert!(prefs.dnd_active(now), "没有到期时刻 = 一直开着");
+
+        prefs.do_not_disturb_until = Some(Timestamp::from_millis(2_000_000));
+        assert!(prefs.dnd_active(now));
+        assert!(
+            !prefs.dnd_active(Timestamp::from_millis(2_000_000)),
+            "到期那一刻起就恢复提醒"
+        );
+        assert!(!prefs.dnd_active(Timestamp::from_millis(9_000_000)));
+    }
+
+    #[test]
+    fn 工作时段_未启用时全天有效() {
+        let hours = WorkHours::default();
+        assert!(hours.contains(3 * 60, 6), "关着时凌晨周日也算工作时段");
+    }
+
+    #[test]
+    fn 工作时段_按起止与工作日判断() {
+        let hours = WorkHours::new(true, 9 * 60, 18 * 60, true);
+
+        assert!(hours.contains(9 * 60, 0), "起点含");
+        assert!(hours.contains(17 * 60 + 59, 4));
+        assert!(!hours.contains(18 * 60, 0), "终点不含");
+        assert!(!hours.contains(8 * 60 + 59, 2));
+        assert!(!hours.contains(12 * 60, 5), "周六不算");
+        assert!(!hours.contains(12 * 60, 6), "周日不算");
+
+        let every_day = WorkHours::new(true, 9 * 60, 18 * 60, false);
+        assert!(every_day.contains(12 * 60, 6));
+    }
+
+    #[test]
+    fn 工作时段_支持跨午夜的夜班() {
+        let night = WorkHours::new(true, 20 * 60, 4 * 60, false);
+
+        assert!(night.contains(23 * 60, 1));
+        assert!(night.contains(2 * 60, 1));
+        assert!(!night.contains(4 * 60, 1));
+        assert!(!night.contains(12 * 60, 1));
+    }
+
+    #[test]
+    fn 工作时段_起止相同视为全天而不是永远静默() {
+        let hours = WorkHours::new(true, 600, 600, false);
+        assert!(hours.contains(0, 0));
+        assert!(hours.contains(1000, 3));
+    }
+
+    #[test]
+    fn 工作时段_越界输入被夹取() {
+        let hours = WorkHours::new(true, 99_999, 99_999, false);
+        assert_eq!(hours.start_minute, WorkHours::MAX_MINUTE);
+        assert_eq!(hours.end_minute, WorkHours::MAX_MINUTE);
     }
 
     #[test]
