@@ -325,6 +325,14 @@
   text-align: right;
 }
 
+/* 连续延后后的一句温和的话 */
+.ask-streak-note {
+  margin: 14px 0 0;
+  color: var(--text-quaternary);
+  max-width: 28em;
+  text-align: center;
+}
+
 /* 「不点会怎样」的说明 —— 放在按钮下面，比按钮上的数字更容易被读到 */
 .ask-auto-hint {
   margin: 14px 0 0;

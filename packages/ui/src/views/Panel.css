@@ -63,6 +63,53 @@
   white-space: nowrap;
 }
 
+.panel-water {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px 0;
+}
+
+.panel-water-track {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface-active);
+  overflow: hidden;
+}
+
+.panel-water-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent-water);
+  transition: width 0.4s ease;
+}
+
+.panel-water-text {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.panel-dnd-menu {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 12px 0;
+}
+
+.panel-dnd-menu-label {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-right: 2px;
+}
+
+.panel-dnd-choice {
+  font-size: var(--text-xs);
+  padding: 3px 8px;
+}
+
 .panel-headline {
   padding: 30px 24px 26px;
 }

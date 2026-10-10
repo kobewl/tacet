@@ -28,7 +28,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use tacet_context::ContextEngine;
+use tacet_context::{ContextEngine, MeetingPhase};
 use tacet_core::event::EventBus;
 use tacet_core::model::{BehaviorKind, SettingsKey};
 use tacet_core::model::{InterventionLevel, InterventionOutcome, NeedKind, Reason};
@@ -36,7 +36,7 @@ use tacet_core::policy::{DecisionInput, InterventionDecision, PolicyEngine, Rece
 use tacet_core::state::{WorkClock, WorkInput, WorkState};
 use tacet_core::time::{Timestamp, MINUTE};
 use tacet_health::need::{NeedCalculator, NeedInputs};
-use tacet_health::window::WindowPolicy;
+use tacet_health::window::{WindowHints, WindowPolicy};
 use tacet_platform::{Platform, PlatformError};
 use tacet_storage::repo::{EventRepo, IntentRepo, InterventionRepo, SettingsRepo};
 use tacet_storage::{Database, LocalOffset};
@@ -158,6 +158,13 @@ pub struct AppState {
     /// 跨天清零用。惰性检查：tick 时发现日期变了就整体归零，
     /// 不需要定时器在午夜准时醒来。
     snooze_streak_day: Option<i64>,
+
+    /// 上一拍的会议阶段（只用来在**阶段变化时**写一条日志）。
+    ///
+    /// 会议感知是「替用户把提醒往后放」的行为，用户事后问
+    /// 「那段时间怎么没提醒我」时，日志里必须有据可查。
+    /// 但每 10 秒记一条会把日志淹掉，所以只记变化。
+    last_meeting_phase: MeetingPhase,
 }
 
 /// 启动时清理超过保留期的原始记录（见 `tacet_storage::RETENTION_DAYS`）。
@@ -255,6 +262,7 @@ impl AppState {
             work_resume_attempted: false,
             snooze_streaks: [0; 4],
             snooze_streak_day: None,
+            last_meeting_phase: MeetingPhase::Clear,
         };
 
         state.close_dangling_break(now)?;
@@ -590,6 +598,7 @@ impl AppState {
             work_resume_attempted: false,
             snooze_streaks: [0; 4],
             snooze_streak_day: None,
+            last_meeting_phase: MeetingPhase::Clear,
         })
     }
 
@@ -849,8 +858,17 @@ impl AppState {
         // 跨天了就把延后连击归零：新的一天，退让从第一档重新开始。
         self.roll_snooze_day_if_needed(now);
 
+        // 定时勿扰到点自动恢复。放在最前面：无论接下来是暂停、休息还是
+        // 正常决策，「到期了」这个事实都该立刻兑现，界面也要同步翻回去。
+        self.expire_do_not_disturb_if_due(now)?;
+
+        // 会议感知开关来自用户偏好。关着时引擎连麦克风都不会去查。
+        let meeting_aware = self.preferences()?.meeting_aware;
+        self.context.set_meeting_sensing(meeting_aware);
+
         // ① 采样上下文
         let context = self.context.sample(self.platform.as_ref(), now);
+        self.log_meeting_phase_change();
 
         // ② 推进状态机
         let idle_seconds = context.idle_seconds;
@@ -889,12 +907,20 @@ impl AppState {
         let (_, top_score) = needs.highest();
         let urgent = top_score.get() >= 0.95;
 
-        let window = self.window_policy.evaluate(
+        // 场合线索：会议（带防抖与会后缓冲的跟踪器结论）与工作时段。
+        let (local_minute, weekday) = self.offset.clock_parts(now);
+        let hints = WindowHints {
+            in_meeting: meeting_aware && self.context.meeting_phase().defers_reminders(),
+            outside_work_hours: !prefs.work_hours.contains(local_minute, weekday),
+        };
+
+        let window = self.window_policy.evaluate_with(
             now,
             &context,
             self.last_interruption_at,
             prefs.idle_threshold_seconds(),
             urgent,
+            hints,
         );
 
         if !window.is_open {
@@ -910,6 +936,10 @@ impl AppState {
                     Some(tacet_health::window::WindowClosedReason::Away) => Reason::UserAway,
                     Some(tacet_health::window::WindowClosedReason::Night) => {
                         Reason::ContextUnavailable
+                    }
+                    Some(tacet_health::window::WindowClosedReason::InMeeting) => Reason::InMeeting,
+                    Some(tacet_health::window::WindowClosedReason::OutsideWorkHours) => {
+                        Reason::OutsideWorkHours
                     }
                     Some(tacet_health::window::WindowClosedReason::JustInterrupted) => {
                         Reason::RateLimited {
@@ -991,6 +1021,90 @@ impl AppState {
         ));
 
         Ok(TickOutcome::Intervene(Box::new(decision)))
+    }
+
+    /// 开关勿扰，可带期限。
+    ///
+    /// - `until = Some(t)`：到 `t` 自动恢复（定时勿扰）
+    /// - `until = None` 且 `enabled`：一直开到用户手动关闭
+    /// - `enabled = false`：关闭，同时清掉期限
+    ///
+    /// 关掉时一并清期限，是为了不留下「开关关着、期限还在」这种半截状态
+    /// —— 下次手动开启时会被一个陈旧的期限立刻关掉，那是很难查的 bug。
+    pub fn set_do_not_disturb(
+        &self,
+        enabled: bool,
+        until: Option<Timestamp>,
+    ) -> Result<(), StateError> {
+        let mut prefs = self.preferences()?;
+        prefs.do_not_disturb = enabled;
+        prefs.do_not_disturb_until = if enabled { until } else { None };
+        SettingsRepo::save_preferences(&self.db, &prefs)?;
+
+        match (enabled, until) {
+            (true, Some(until)) => crate::logging::info(&format!(
+                "勿扰已开启，{} 分钟后自动恢复",
+                (until.millis_since(Timestamp::now()) / MINUTE).max(0)
+            )),
+            (true, None) => crate::logging::info("勿扰已开启，直到手动关闭"),
+            (false, _) => crate::logging::info("勿扰已关闭"),
+        }
+        Ok(())
+    }
+
+    /// 定时勿扰到期了就关掉，并把关掉这件事落库。
+    ///
+    /// 只在「开着且有期限且已过期」时动手；没有期限的勿扰（手动开、手动关）
+    /// 不受影响。落库用整套偏好保存，与设置页走同一条路径，保证一致。
+    pub fn expire_do_not_disturb_if_due(&mut self, now: Timestamp) -> Result<(), StateError> {
+        let mut prefs = self.preferences()?;
+        let expired =
+            prefs.do_not_disturb && prefs.do_not_disturb_until.is_some_and(|until| now >= until);
+        if !expired {
+            return Ok(());
+        }
+
+        prefs.do_not_disturb = false;
+        prefs.do_not_disturb_until = None;
+        SettingsRepo::save_preferences(&self.db, &prefs)?;
+        crate::logging::info("定时勿扰到期，已自动恢复提醒");
+        Ok(())
+    }
+
+    /// 会议阶段变化时记一条日志（只记变化，不每拍都记）。
+    fn log_meeting_phase_change(&mut self) {
+        let phase = self.context.meeting_phase();
+        if phase == self.last_meeting_phase {
+            return;
+        }
+
+        let message = match phase {
+            MeetingPhase::InCall => "会议感知：检测到麦克风被占用，提醒推迟到会后",
+            MeetingPhase::Settling => "会议感知：麦克风已释放，会后缓冲 3 分钟再恢复提醒",
+            MeetingPhase::GaveUp => {
+                "会议感知：麦克风持续占用超过 90 分钟，多半不是会议，不再推迟提醒"
+            }
+            MeetingPhase::Clear => "会议感知：恢复正常提醒",
+        };
+        crate::logging::info(message);
+        self.last_meeting_phase = phase;
+    }
+
+    /// 当前会议推迟状态，给界面用：`in_call` / `settling` / `None`。
+    pub fn meeting_deferral(&self) -> Option<&'static str> {
+        self.context.meeting_phase().ui_label()
+    }
+
+    /// 领衔需求当前连续延后了几次（没有进行中的提醒时为 0）。
+    ///
+    /// 界面据此决定是否在询问页加一句温和的话。**只用来换文案，
+    /// 不用来换功能** —— 跳过 / 延后始终是平等的正常选项，永不锁屏。
+    pub fn active_snooze_streak(&self) -> u32 {
+        self.active_decision
+            .as_ref()
+            .and_then(|decision| Self::snooze_streak_index(decision.kind))
+            .map(|index| self.snooze_streaks[index])
+            .unwrap_or(0)
     }
 
     /// 记录一次用户行为（喝水 / 活动 / 远眺）。
@@ -1423,6 +1537,21 @@ impl AppState {
 /// 从 Intent 里取出 id（用于事件载荷）。
 fn id_intent(intent: &tacet_core::model::Intent) -> i64 {
     intent.id.unwrap_or(0)
+}
+
+/// 下一个本地「早上 `hour` 点」。
+///
+/// 「勿扰到明早」的落点。规则：今天的 `hour` 点还没到就用今天的
+/// （凌晨两点还在用电脑，说「到早上」指的是几小时后），否则用明天的。
+pub fn next_morning(now: Timestamp, offset: LocalOffset, hour: u32) -> Timestamp {
+    let today = tacet_storage::DateWindow::day_of(now, offset);
+    let offset_ms = hour.min(23) as i64 * 60 * MINUTE;
+    let candidate = today.start.saturating_add_millis(offset_ms);
+    if candidate > now {
+        candidate
+    } else {
+        today.end.saturating_add_millis(offset_ms)
+    }
 }
 
 /// 两个可选时刻里**较晚**的那个（都缺则为 `None`）。
@@ -3395,5 +3524,312 @@ mod tests {
         state.tick(now.saturating_add_millis(10_000)).expect("tick");
 
         assert_eq!(state.active_decision, Some(decision));
+    }
+
+    // ======================================================== v0.3：会议 / 勿扰 / 工作时段
+
+    /// 造一个「只开休息提醒、间隔 45 分钟」的场景，并交出平台控制柄。
+    ///
+    /// 与 `state_with_rest_interval` 的区别：这里要在测试里随时拨动
+    /// 麦克风占用，所以得拿到 `control`。
+    fn scene_with_control(
+        start: Timestamp,
+    ) -> (AppState, std::sync::Arc<tacet_platform::mocks::MockControl>) {
+        use std::sync::Arc;
+        use tacet_core::model::BehaviorKind;
+        use tacet_storage::repo::EventRepo;
+
+        let platform = MockPlatform::new();
+        let control = Arc::clone(&platform.control);
+        let state = AppState::in_memory(Box::new(platform)).expect("建立状态");
+
+        let mut prefs = state.preferences().expect("读偏好");
+        prefs.reminders.rest = tacet_core::model::ReminderRule::new(true, 45);
+        prefs.reminders.hydration.enabled = false;
+        prefs.reminders.movement.enabled = false;
+        prefs.reminders.eye_rest.enabled = false;
+        SettingsRepo::save_preferences(&state.db, &prefs).expect("保存偏好");
+
+        // 「距上次休息」的起点
+        EventRepo::append(&state.db, BehaviorKind::BreakCompleted, "{}", start).expect("记录休息");
+        (state, control)
+    }
+
+    /// 逐分钟 tick，返回第一次开口落在第几分钟。
+    fn first_intervention_minute(
+        state: &mut AppState,
+        start: Timestamp,
+        until_minute: u32,
+    ) -> Option<u32> {
+        for minute in 0..=until_minute {
+            let now = start.saturating_add_millis(minute as i64 * MINUTE);
+            if matches!(state.tick(now).expect("tick"), TickOutcome::Intervene(_)) {
+                return Some(minute);
+            }
+        }
+        None
+    }
+
+    /// 验收：会议中到点不弹，会后缓冲期过了才补上。
+    ///
+    /// 休息 45 分钟到点时人正在会上（第 40~60 分钟麦克风被占用）：
+    ///
+    /// - 第 45 分钟需求到点，但推迟
+    /// - 第 60 分钟最后一次占用，第 61 分钟起释放
+    /// - 第 63 分钟距最后一次占用满 3 分钟 → 放行，立刻补上
+    ///
+    /// 走完整的 tick 链路：它横跨 context（麦克风 → 跟踪器）、window（优先级）、
+    /// state（原因与日志）三层。
+    #[test]
+    fn 会议中到点不弹_会后缓冲结束才补上() {
+        let start = afternoon();
+        let (mut state, control) = scene_with_control(start);
+
+        let mut fired_at = None;
+        for minute in 0..=90u32 {
+            let now = start.saturating_add_millis(minute as i64 * MINUTE);
+            control.set_microphone_in_use((40..=60).contains(&minute));
+
+            if matches!(state.tick(now).expect("tick"), TickOutcome::Intervene(_)) {
+                fired_at = Some(minute);
+                break;
+            }
+
+            // 会议期间，「为什么没提醒」要有据可查
+            if (45..=60).contains(&minute) {
+                let decision = state.last_decision.as_ref().expect("有决策");
+                assert!(
+                    decision.reasons.contains(&Reason::InMeeting),
+                    "第 {minute} 分钟在会上，静默理由应当是 InMeeting：{:?}",
+                    decision.reasons
+                );
+            }
+        }
+
+        assert_eq!(
+            fired_at,
+            Some(63),
+            "会议结束（第 60 分钟）后缓冲 3 分钟，应当在第 63 分钟补上提醒"
+        );
+    }
+
+    #[test]
+    fn 会议感知给界面的状态随阶段变化() {
+        let start = afternoon();
+        let (mut state, control) = scene_with_control(start);
+
+        control.set_microphone_in_use(false);
+        state.tick(start).expect("tick");
+        assert_eq!(state.meeting_deferral(), None);
+
+        control.set_microphone_in_use(true);
+        state
+            .tick(start.saturating_add_millis(10_000))
+            .expect("tick");
+        assert_eq!(state.meeting_deferral(), Some("in_call"));
+
+        control.set_microphone_in_use(false);
+        state
+            .tick(start.saturating_add_millis(20_000))
+            .expect("tick");
+        assert_eq!(state.meeting_deferral(), Some("settling"));
+    }
+
+    #[test]
+    fn 关掉会议感知后会议中照常提醒() {
+        let start = afternoon();
+        let (mut state, control) = scene_with_control(start);
+
+        let mut prefs = state.preferences().expect("读偏好");
+        prefs.meeting_aware = false;
+        SettingsRepo::save_preferences(&state.db, &prefs).expect("保存偏好");
+
+        control.set_microphone_in_use(true);
+        assert_eq!(
+            first_intervention_minute(&mut state, start, 120),
+            Some(45),
+            "用户关掉会议感知，会上也要照常到点提醒"
+        );
+        assert_eq!(state.meeting_deferral(), None);
+    }
+
+    /// 保险丝：某个后台程序一直占着麦克风，提醒不能被永久吞掉。
+    #[test]
+    fn 麦克风持续占用满九十分钟后提醒照常发出() {
+        let start = afternoon();
+        let (mut state, control) = scene_with_control(start);
+
+        control.set_microphone_in_use(true);
+        assert_eq!(
+            first_intervention_minute(&mut state, start, 180),
+            Some(90),
+            "休息第 45 分钟到点被推迟，占用满 90 分钟后保险丝熔断，在第 90 分钟放行"
+        );
+    }
+
+    #[test]
+    fn 不在工作时段不提醒_在工作时段照常提醒() {
+        // afternoon() 是 UTC 14:00（周二），本地偏移为 UTC
+        let start = afternoon();
+
+        // 工作时段 9:00~12:00：14 点在时段外
+        let (mut outside, _) = scene_with_control(start);
+        let mut prefs = outside.preferences().expect("读偏好");
+        prefs.work_hours = tacet_core::model::WorkHours::new(true, 9 * 60, 12 * 60, false);
+        SettingsRepo::save_preferences(&outside.db, &prefs).expect("保存偏好");
+        assert_eq!(
+            first_intervention_minute(&mut outside, start, 120),
+            None,
+            "不在工作时段，哪怕需求拉满也不该提醒"
+        );
+        assert!(
+            outside
+                .last_decision
+                .as_ref()
+                .expect("有决策")
+                .reasons
+                .contains(&Reason::OutsideWorkHours),
+            "静默理由应当如实写明「不在工作时段」"
+        );
+
+        // 工作时段 9:00~18:00：14 点在时段内
+        let (mut inside, _) = scene_with_control(start);
+        let mut prefs = inside.preferences().expect("读偏好");
+        prefs.work_hours = tacet_core::model::WorkHours::new(true, 9 * 60, 18 * 60, false);
+        SettingsRepo::save_preferences(&inside.db, &prefs).expect("保存偏好");
+        assert_eq!(first_intervention_minute(&mut inside, start, 120), Some(45));
+    }
+
+    #[test]
+    fn 工作时段只限工作日时周末不提醒() {
+        // 把起点挪到周六：1_700_000_000_000 是周二（2023-11-14），+4 天 = 周六
+        let saturday = afternoon().saturating_add_millis(4 * 24 * 60 * MINUTE);
+        let (mut state, _) = scene_with_control(saturday);
+
+        let mut prefs = state.preferences().expect("读偏好");
+        prefs.work_hours = tacet_core::model::WorkHours::new(true, 9 * 60, 18 * 60, true);
+        SettingsRepo::save_preferences(&state.db, &prefs).expect("保存偏好");
+
+        assert_eq!(
+            first_intervention_minute(&mut state, saturday, 120),
+            None,
+            "只限工作日时，周六 14 点也算时段外"
+        );
+    }
+
+    /// 定时勿扰：到点自动恢复，且恢复之后提醒照常。
+    #[test]
+    fn 定时勿扰到期后自动恢复提醒() {
+        let start = afternoon();
+        let (mut state, _) = scene_with_control(start);
+
+        // 勿扰 30 分钟：休息第 45 分钟到点时早已恢复
+        state
+            .set_do_not_disturb(true, Some(start.saturating_add_millis(30 * MINUTE)))
+            .expect("开启勿扰");
+
+        assert_eq!(
+            first_intervention_minute(&mut state, start, 120),
+            Some(45),
+            "勿扰 30 分钟到期后恢复，休息仍在第 45 分钟到点"
+        );
+
+        let prefs = state.preferences().expect("读偏好");
+        assert!(!prefs.do_not_disturb, "到期后开关应当被真正关掉并落库");
+        assert_eq!(prefs.do_not_disturb_until, None);
+    }
+
+    #[test]
+    fn 勿扰期间到点也不提醒_理由是勿扰() {
+        let start = afternoon();
+        let (mut state, _) = scene_with_control(start);
+
+        state
+            .set_do_not_disturb(true, Some(start.saturating_add_millis(120 * MINUTE)))
+            .expect("开启勿扰");
+
+        assert_eq!(first_intervention_minute(&mut state, start, 100), None);
+        assert!(state
+            .last_decision
+            .as_ref()
+            .expect("有决策")
+            .reasons
+            .contains(&Reason::DoNotDisturb));
+    }
+
+    #[test]
+    fn 没有期限的勿扰一直有效直到手动关闭() {
+        let start = afternoon();
+        let (mut state, _) = scene_with_control(start);
+
+        state.set_do_not_disturb(true, None).expect("开启勿扰");
+        assert_eq!(first_intervention_minute(&mut state, start, 300), None);
+        assert!(
+            state.preferences().expect("读偏好").do_not_disturb,
+            "没有期限就不该自己关掉"
+        );
+
+        state.set_do_not_disturb(false, None).expect("关闭勿扰");
+        let prefs = state.preferences().expect("读偏好");
+        assert!(!prefs.do_not_disturb);
+        assert_eq!(prefs.do_not_disturb_until, None);
+    }
+
+    #[test]
+    fn 关闭勿扰会同时清掉期限() {
+        let state = state();
+        let later = Timestamp::now().saturating_add_millis(60 * MINUTE);
+
+        state.set_do_not_disturb(true, Some(later)).expect("开启");
+        state.set_do_not_disturb(false, Some(later)).expect("关闭");
+
+        let prefs = state.preferences().expect("读偏好");
+        assert_eq!(
+            prefs.do_not_disturb_until, None,
+            "关着的开关不该留着期限，否则下次手动开启会被陈旧期限立刻关掉"
+        );
+    }
+
+    #[test]
+    fn 明早的落点() {
+        const DAY_MS: i64 = 24 * 60 * MINUTE;
+        let midnight = Timestamp::from_millis(1_700_000_000_000 / DAY_MS * DAY_MS);
+        let utc = LocalOffset::utc();
+        let at =
+            |hour: i64, minute: i64| midnight.saturating_add_millis((hour * 60 + minute) * MINUTE);
+
+        // 下午 2 点说「到明早」→ 次日 8 点
+        assert_eq!(next_morning(at(14, 0), utc, 8), at(24 + 8, 0));
+        // 凌晨 3 点说「到早上」→ 当天 8 点（几个小时后）
+        assert_eq!(next_morning(at(3, 0), utc, 8), at(8, 0));
+        // 恰好 8 点整：今天的 8 点已经不算「还没到」→ 次日
+        assert_eq!(next_morning(at(8, 0), utc, 8), at(24 + 8, 0));
+        // 7:59 → 当天 8 点
+        assert_eq!(next_morning(at(7, 59), utc, 8), at(8, 0));
+
+        // 东八区：UTC 14:00 = 本地 22:00，次日本地 8 点 = UTC 次日 0:00
+        let cst = LocalOffset::from_hours(8);
+        assert_eq!(next_morning(at(14, 0), cst, 8), at(24, 0));
+    }
+
+    #[test]
+    fn 连续延后次数对应当前提醒() {
+        use tacet_core::model::InterventionLevel;
+
+        let mut state = state();
+        assert_eq!(state.active_snooze_streak(), 0, "没有进行中的提醒时为 0");
+
+        state.active_decision = Some(InterventionDecision {
+            kind: NeedKind::Rest,
+            level: InterventionLevel::FullScreen,
+            reasons: Vec::new(),
+            actions: Vec::new(),
+            fused: Vec::new(),
+        });
+        assert_eq!(state.active_snooze_streak(), 0);
+
+        let rest_index = AppState::snooze_streak_index(NeedKind::Rest).expect("休息有连击槽位");
+        state.snooze_streaks[rest_index] = 2;
+        assert_eq!(state.active_snooze_streak(), 2);
     }
 }

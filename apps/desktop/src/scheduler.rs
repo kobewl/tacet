@@ -236,6 +236,23 @@ pub fn build_snapshot(state: &AppState) -> Option<serde_json::Value> {
 
     let _ = InterventionRepo::stats_in_window(&state.db, &today);
 
+    // 「实际生效」的勿扰：开着且没过期。过期但还没被 tick 清掉的那一瞬，
+    // 界面也不该再显示勿扰中。
+    let dnd_active = prefs.dnd_active(now);
+    let dnd_until_ms = if dnd_active {
+        prefs.do_not_disturb_until.map(|until| until.as_millis())
+    } else {
+        None
+    };
+    // 会议推迟状态：`in_call` / `settling` / null。关掉会议感知则恒为 null。
+    let meeting_deferral = if prefs.meeting_aware {
+        state.meeting_deferral()
+    } else {
+        None
+    };
+    let (local_minute, weekday) = state.offset.clock_parts(now);
+    let outside_work_hours = !prefs.work_hours.contains(local_minute, weekday);
+
     Some(serde_json::json!({
         "state": state.work_state().as_str(),
         "continuousWorkMinutes": state.continuous_work_minutes(),
@@ -260,7 +277,12 @@ pub fn build_snapshot(state: &AppState) -> Option<serde_json::Value> {
         "snoozeMinutes": state.offered_snooze_minutes(),
         "today": today_summary,
         "week": week_summary,
-        "doNotDisturb": prefs.do_not_disturb,
+        "doNotDisturb": dnd_active,
+        "doNotDisturbUntilMs": dnd_until_ms,
+        "meetingDeferral": meeting_deferral,
+        "snoozeStreak": state.active_snooze_streak(),
+        "waterGoalCups": prefs.water_goal_cups,
+        "outsideWorkHours": outside_work_hours,
         "pendingIntent": pending_intent,
         "lastDecision": last_decision,
         "breakRemainingSeconds": state.break_remaining_seconds(now),

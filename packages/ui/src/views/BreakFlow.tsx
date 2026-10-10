@@ -47,6 +47,7 @@ import {
   formatClock,
   needMeta,
   reasonText,
+  snoozeStreakNote,
   type IntentRecord,
   type NeedKind,
   type TacetEvent,
@@ -653,6 +654,8 @@ function AskStage({
     })();
   };
 
+  const streakNote = snoozeStreakNote(snapshot.snoozeStreak);
+
   // 「为什么现在提醒我」—— 交互原则 5：提醒卡片上永远能找到理由。
   const why = decision?.reasons ?? [];
   // 过滤掉「需求 XX%」这类内部指标，用户看到的应该是具体事实
@@ -769,6 +772,10 @@ function AskStage({
           这次不用
         </button>
       </div>
+
+      {/* 连续延后之后的一句话：只换文案，不换功能。
+          跳过 / 延后依然是平等的正常选项，永远不会锁屏或禁用按钮。 */}
+      {streakNote ? <p className="sub ask-streak-note">{streakNote}</p> : null}
 
       {/* 倒计时在做什么，得说清楚 —— 否则用户看着按钮上的数字变小时
           会以为这是个必须等完的进度条，而不是「不点会发生什么」的预告。 */}

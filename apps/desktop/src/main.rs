@@ -280,7 +280,7 @@ fn main() {
 
 /// 建立菜单栏托盘。
 fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::menu::{MenuBuilder, MenuItemBuilder};
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     // 托盘的图标：一个内嵌的 PNG —— **乐谱的休止符**。
@@ -310,10 +310,21 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
     let settings_item = MenuItemBuilder::with_id("settings", "设置…").build(app)?;
     let quit_item = MenuItemBuilder::with_id("quit", "退出 Tacet").build(app)?;
 
+    // 勿扰子菜单：不用点开面板就能开关。菜单是静态的，当前是否勿扰中看面板顶部的状态条。
+    let dnd_menu = SubmenuBuilder::with_id(app, "dnd", "勿扰")
+        .text("dnd_30", "30 分钟")
+        .text("dnd_60", "1 小时")
+        .text("dnd_120", "2 小时")
+        .text("dnd_morning", "到明早 8 点")
+        .separator()
+        .text("dnd_off", "恢复提醒")
+        .build()?;
+
     let menu = MenuBuilder::new(app)
         .item(&open_item)
         .item(&today_item)
         .separator()
+        .item(&dnd_menu)
         .item(&preview_item)
         .item(&settings_item)
         .separator()
@@ -338,6 +349,24 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
             }
             "settings" => {
                 let _ = windows::open_settings(app);
+            }
+            id if id.starts_with("dnd_") => {
+                use commands::DndSpan;
+                let choice = match id {
+                    "dnd_30" => Some((true, DndSpan::Minutes(30))),
+                    "dnd_60" => Some((true, DndSpan::Minutes(60))),
+                    "dnd_120" => Some((true, DndSpan::Minutes(120))),
+                    "dnd_morning" => Some((true, DndSpan::UntilMorning)),
+                    "dnd_off" => Some((false, DndSpan::Indefinite)),
+                    _ => None,
+                };
+                if let (Some((enabled, span)), Some(shared)) =
+                    (choice, app.try_state::<windows::SharedState>())
+                {
+                    if let Err(err) = commands::apply_do_not_disturb(app, &shared, enabled, span) {
+                        logging::warn(&format!("托盘切换勿扰失败：{}", err.message));
+                    }
+                }
             }
             "quit" => {
                 // 显式退出：这次要真的退出，不能被 ExitRequested 拦下来。

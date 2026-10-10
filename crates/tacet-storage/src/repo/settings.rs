@@ -15,7 +15,7 @@
 //!    业务代码拿到的是 `UserPreferences` 这个完整对象，不用关心若干条 KV
 
 use rusqlite::params;
-use tacet_core::model::{SettingsKey, UserPreferences};
+use tacet_core::model::{SettingsKey, UserPreferences, WorkHours};
 use tacet_core::Timestamp;
 
 use crate::db::{data_error, Database};
@@ -81,6 +81,16 @@ impl SettingsRepo {
                         .map(|f| f.max(0.0).min(u32::MAX as f64) as u32)
                 })
         }))
+    }
+
+    /// 读取一个可空的毫秒时间戳（勿扰到期时刻用）。
+    ///
+    /// 缺失、`null`、类型不符都返回 `None` —— 对「到期时刻」而言它们是同一个意思：
+    /// 没有期限。
+    pub fn get_timestamp(db: &Database, key: SettingsKey) -> Result<Option<Timestamp>> {
+        Ok(Self::get(db, key)?
+            .and_then(|value| value.as_i64())
+            .map(Timestamp::from_millis))
     }
 
     /// 读取一个字符串数组设置（延后选项用）。
@@ -155,6 +165,36 @@ impl SettingsRepo {
                 serde_json::json!(prefs.do_not_disturb),
             ),
             (
+                SettingsKey::DoNotDisturbUntil,
+                // 没有期限写 null：这样「到期后清掉」也走同一条保存路径，
+                // 不需要为删除单独开口子。
+                serde_json::json!(prefs.do_not_disturb_until.map(|t| t.as_millis())),
+            ),
+            (
+                SettingsKey::MeetingAware,
+                serde_json::json!(prefs.meeting_aware),
+            ),
+            (
+                SettingsKey::WorkHoursEnabled,
+                serde_json::json!(prefs.work_hours.enabled),
+            ),
+            (
+                SettingsKey::WorkHoursStart,
+                serde_json::json!(prefs.work_hours.start_minute),
+            ),
+            (
+                SettingsKey::WorkHoursEnd,
+                serde_json::json!(prefs.work_hours.end_minute),
+            ),
+            (
+                SettingsKey::WorkHoursWeekdaysOnly,
+                serde_json::json!(prefs.work_hours.weekdays_only),
+            ),
+            (
+                SettingsKey::WaterGoalCups,
+                serde_json::json!(prefs.water_goal_cups),
+            ),
+            (
                 SettingsKey::IdleThresholdMinutes,
                 serde_json::json!(prefs.idle_threshold_minutes),
             ),
@@ -215,6 +255,26 @@ impl SettingsRepo {
         }
         if let Some(value) = Self::get_bool(db, SettingsKey::DoNotDisturb)? {
             prefs.do_not_disturb = value;
+        }
+        prefs.do_not_disturb_until = Self::get_timestamp(db, SettingsKey::DoNotDisturbUntil)?;
+        if let Some(value) = Self::get_bool(db, SettingsKey::MeetingAware)? {
+            prefs.meeting_aware = value;
+        }
+        let hours_enabled = Self::get_bool(db, SettingsKey::WorkHoursEnabled)?;
+        let hours_start = Self::get_u32(db, SettingsKey::WorkHoursStart)?;
+        let hours_end = Self::get_u32(db, SettingsKey::WorkHoursEnd)?;
+        let hours_weekdays = Self::get_bool(db, SettingsKey::WorkHoursWeekdaysOnly)?;
+        let default_hours = WorkHours::default();
+        // 经过构造函数夹取：库里的脏值（如 99999 分钟）不该流进业务逻辑
+        prefs.work_hours = WorkHours::new(
+            hours_enabled.unwrap_or(default_hours.enabled),
+            hours_start.unwrap_or(default_hours.start_minute),
+            hours_end.unwrap_or(default_hours.end_minute),
+            hours_weekdays.unwrap_or(default_hours.weekdays_only),
+        );
+        if let Some(value) = Self::get_u32(db, SettingsKey::WaterGoalCups)? {
+            let (low, high) = UserPreferences::WATER_GOAL_RANGE;
+            prefs.water_goal_cups = value.clamp(low, high);
         }
         if let Some(value) = Self::get_u32(db, SettingsKey::IdleThresholdMinutes)? {
             prefs.idle_threshold_minutes = value.max(1);
@@ -350,6 +410,10 @@ mod tests {
                 eye_rest: ReminderRule::new(false, 45),
             },
             do_not_disturb: true,
+            do_not_disturb_until: Some(Timestamp::from_millis(1_800_000_000_000)),
+            meeting_aware: false,
+            work_hours: WorkHours::new(true, 8 * 60 + 30, 17 * 60 + 45, false),
+            water_goal_cups: 6,
             idle_threshold_minutes: 8,
             break_duration_minutes: 10,
             snooze_options_minutes: vec![2, 5, 10],
@@ -369,8 +433,8 @@ mod tests {
 
         SettingsRepo::save_preferences(&db, &prefs).expect("保存");
 
-        // 12 项设置应当全部写入
-        assert_eq!(SettingsRepo::count(&db).expect("计数"), 12);
+        // 19 项设置应当全部写入（20 个键里，引导标记不属于「偏好」）
+        assert_eq!(SettingsRepo::count(&db).expect("计数"), 19);
     }
 
     #[test]
@@ -522,6 +586,9 @@ mod tests {
                 | SettingsKey::ReminderMovementEnabled
                 | SettingsKey::ReminderEyeRestEnabled
                 | SettingsKey::DoNotDisturb
+                | SettingsKey::MeetingAware
+                | SettingsKey::WorkHoursEnabled
+                | SettingsKey::WorkHoursWeekdaysOnly
                 | SettingsKey::OnboardingCompleted => serde_json::json!(true),
                 _ => serde_json::json!(7),
             };

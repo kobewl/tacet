@@ -7,7 +7,15 @@
  * rest / hydration / movement 三种写法两种口径恰好相同，所以只有护眼会崩。
  */
 import { describe, expect, it } from "vitest";
-import { reasonText, type NeedKind } from "./types";
+import {
+  dndRemainingText,
+  formatMinuteOfDay,
+  parseMinuteOfDay,
+  reasonText,
+  snoozeStreakNote,
+  waterProgress,
+  type NeedKind,
+} from "./types";
 
 /** 后端真实吐出的 snake_case 口径，前端类型里并不存在这个值。 */
 const backendEyeRest = "eye_rest" as NeedKind;
@@ -47,5 +55,45 @@ describe("reasonText 口径护栏", () => {
       minutes_ago: 5,
     });
     expect(text).toBe("5 分钟前刚提醒过护眼");
+  });
+});
+
+describe("v0.3 新增的展示辅助", () => {
+  it("会议与工作时段的理由有人话", () => {
+    expect(reasonText({ reason: "in_meeting" })).toContain("会议");
+    expect(reasonText({ reason: "outside_work_hours" })).toContain("工作时段");
+  });
+
+  it("时刻与分钟数互相转换", () => {
+    expect(formatMinuteOfDay(9 * 60 + 5)).toBe("09:05");
+    expect(parseMinuteOfDay("19:30")).toBe(19 * 60 + 30);
+    expect(parseMinuteOfDay("25:00")).toBeNull();
+    expect(parseMinuteOfDay("abc")).toBeNull();
+  });
+
+  it("勿扰剩余时间", () => {
+    const now = new Date(2026, 0, 1, 10, 0).getTime();
+    expect(dndRemainingText(null, now)).toBe("直到你手动关闭");
+    expect(dndRemainingText(now + 25 * 60_000, now)).toBe("还剩 25 分钟");
+    // 超过 2 小时改说几点
+    expect(dndRemainingText(new Date(2026, 0, 2, 8, 0).getTime(), now)).toBe("到 08:00");
+  });
+
+  it("喝水进度封顶且不除零", () => {
+    expect(waterProgress(4, 8)).toBe(0.5);
+    expect(waterProgress(12, 8)).toBe(1);
+    expect(waterProgress(3, 0)).toBe(0);
+  });
+
+  it("连续延后的文案不带评判，且永远只是文案", () => {
+    expect(snoozeStreakNote(0)).toBeNull();
+    expect(snoozeStreakNote(1)).toBeNull();
+    for (const streak of [2, 3, 6]) {
+      const note = snoozeStreakNote(streak);
+      expect(note).not.toBeNull();
+      for (const banned of ["又", "应该", "必须", "太久", "还没", "竟然", "居然"]) {
+        expect(note).not.toContain(banned);
+      }
+    }
   });
 });

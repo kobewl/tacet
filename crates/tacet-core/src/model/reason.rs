@@ -42,6 +42,10 @@ pub enum Reason {
     UserAway,
     /// 勿扰模式开着。
     DoNotDisturb,
+    /// 麦克风被占用（会议 / 通话中），提醒推迟到会后。
+    InMeeting,
+    /// 现在不在用户设定的工作时段内。
+    OutsideWorkHours,
     /// 需求还没到提醒阈值。
     NeedBelowThreshold { kind: NeedKind, percent: u32 },
     /// 同类提醒刚刚发过，为了不烦人而主动限流。
@@ -68,6 +72,8 @@ impl Reason {
             Reason::AppFullscreen { app } => format!("{app} 正在全屏使用"),
             Reason::UserAway => "你刚刚不在电脑前".to_string(),
             Reason::DoNotDisturb => "勿扰模式已开启".to_string(),
+            Reason::InMeeting => "你正在会议或通话中，提醒会推迟到会后".to_string(),
+            Reason::OutsideWorkHours => "现在不在你设定的工作时段".to_string(),
             Reason::NeedBelowThreshold { kind, percent } => {
                 format!("{}需求 {percent}%，暂时不需要提醒", kind.display_name())
             }
@@ -105,6 +111,8 @@ impl Reason {
             Reason::AppFullscreen { .. }
             | Reason::UserAway
             | Reason::DoNotDisturb
+            | Reason::InMeeting
+            | Reason::OutsideWorkHours
             | Reason::ContextUnavailable => None,
         }
     }
@@ -136,6 +144,8 @@ mod tests {
             },
             Reason::UserAway,
             Reason::DoNotDisturb,
+            Reason::InMeeting,
+            Reason::OutsideWorkHours,
             Reason::NeedBelowThreshold {
                 kind: NeedKind::Rest,
                 percent: 32,
@@ -200,7 +210,26 @@ mod tests {
             Some(NeedKind::EyeRest)
         );
         assert_eq!(Reason::DoNotDisturb.need_kind(), None);
+        assert_eq!(Reason::InMeeting.need_kind(), None);
+        assert_eq!(Reason::OutsideWorkHours.need_kind(), None);
         assert_eq!(Reason::AppFullscreen { app: "X".into() }.need_kind(), None);
+    }
+
+    #[test]
+    fn 会议与工作时段理由的文案和序列化() {
+        assert_eq!(
+            Reason::InMeeting.to_text(),
+            "你正在会议或通话中，提醒会推迟到会后"
+        );
+        assert_eq!(
+            Reason::OutsideWorkHours.to_text(),
+            "现在不在你设定的工作时段"
+        );
+
+        let json = serde_json::to_string(&Reason::InMeeting).expect("序列化不应失败");
+        assert_eq!(json, "{\"reason\":\"in_meeting\"}");
+        let back: Reason = serde_json::from_str(&json).expect("反序列化不应失败");
+        assert_eq!(back, Reason::InMeeting);
     }
 
     #[test]

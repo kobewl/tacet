@@ -115,6 +115,10 @@ pub enum WindowClosedReason {
     Away,
     /// 刚打扰过，需要留出安静期。
     JustInterrupted,
+    /// 用户在会议 / 通话中，提醒推迟到会后。
+    InMeeting,
+    /// 不在用户设定的工作时段内。
+    OutsideWorkHours,
 }
 
 impl WindowClosedReason {
@@ -124,8 +128,23 @@ impl WindowClosedReason {
             WindowClosedReason::Night => "现在是深夜",
             WindowClosedReason::Away => "你不在电脑前",
             WindowClosedReason::JustInterrupted => "刚刚提醒过",
+            WindowClosedReason::InMeeting => "你在会议或通话中",
+            WindowClosedReason::OutsideWorkHours => "不在工作时段",
         }
     }
+}
+
+/// 调用方额外告知的「场合」线索。
+///
+/// 这两项**不由窗口策略自己判断**：会议状态来自带防抖的跟踪器，
+/// 工作时段要查用户偏好与本地日历 —— 都是有状态或要读配置的事，
+/// 窗口策略只负责「拿到线索后怎么排优先级」，保持它是个纯函数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowHints {
+    /// 用户处在会议 / 通话中（或会后缓冲期）。
+    pub in_meeting: bool,
+    /// 当前不在用户设定的工作时段内。
+    pub outside_work_hours: bool,
 }
 
 /// 时机窗口策略。
@@ -200,12 +219,54 @@ impl WindowPolicy {
         idle_threshold_seconds: u32,
         urgent: bool,
     ) -> ReminderWindow {
+        self.evaluate_with(
+            now,
+            context,
+            last_interruption_at,
+            idle_threshold_seconds,
+            urgent,
+            WindowHints::default(),
+        )
+    }
+
+    /// 带场合线索的判断（会议 / 工作时段）。
+    ///
+    /// ## 两条新规则为什么排在紧急豁免**之前**
+    ///
+    /// 紧急豁免豁免的是「深夜」「安静期」这类**时机上的小顾虑**。
+    /// 会议和工作时段不是小顾虑：
+    ///
+    /// - **会议**：需求拉满正是一个人连开三小时会的典型状态。
+    ///   如果「紧急」能冲破会议，那这条规则等于只在最不需要的时候生效。
+    ///   推迟不是丢弃 —— 会后缓冲期一过，需求依旧拉满，提醒立刻补上。
+    ///   （持续占用满 90 分钟的保险丝在跟踪器里，不在这里。）
+    /// - **工作时段**：用户明确说了「只在这段时间提醒我」，
+    ///   这是他亲手设的边界，优先级高于我们对他健康的判断。
+    ///
+    /// 优先级：人不在 > 非工作时段 > 会议 > 紧急豁免 > 安静期 > 深夜。
+    pub fn evaluate_with(
+        &self,
+        now: Timestamp,
+        context: &ContextSnapshot,
+        last_interruption_at: Option<Timestamp>,
+        idle_threshold_seconds: u32,
+        urgent: bool,
+        hints: WindowHints,
+    ) -> ReminderWindow {
         let hour = hour_of_day(now);
         let day_part = DayPart::from_hour(hour);
 
         // ① 人不在电脑前 —— 排在紧急豁免之前，理由见上面的文档。
         if context.is_away(idle_threshold_seconds) {
             return ReminderWindow::closed(day_part, WindowClosedReason::Away);
+        }
+
+        // ①′ 用户划定的边界与场合：同样不被紧急豁免。
+        if hints.outside_work_hours {
+            return ReminderWindow::closed(day_part, WindowClosedReason::OutsideWorkHours);
+        }
+        if hints.in_meeting {
+            return ReminderWindow::closed(day_part, WindowClosedReason::InMeeting);
         }
 
         // ② 紧急豁免：需求拉满时，前面所有顾虑都让路。
@@ -285,6 +346,86 @@ mod tests {
         assert!(window.is_open);
         assert_eq!(window.day_part, DayPart::Afternoon);
         assert_eq!(window.closed_reason, None);
+    }
+
+    #[test]
+    fn 会议中窗口关闭_紧急也不例外() {
+        let policy = WindowPolicy::new();
+        let hints = WindowHints {
+            in_meeting: true,
+            outside_work_hours: false,
+        };
+
+        let normal = policy.evaluate_with(at_hour(14), &active_context(), None, 300, false, hints);
+        assert!(!normal.is_open);
+        assert_eq!(normal.closed_reason, Some(WindowClosedReason::InMeeting));
+
+        let urgent = policy.evaluate_with(at_hour(14), &active_context(), None, 300, true, hints);
+        assert!(
+            !urgent.is_open,
+            "连开三小时会时需求必然拉满，紧急不能冲破会议"
+        );
+        assert_eq!(urgent.closed_reason, Some(WindowClosedReason::InMeeting));
+    }
+
+    #[test]
+    fn 非工作时段窗口关闭_紧急也不例外() {
+        let policy = WindowPolicy::new();
+        let hints = WindowHints {
+            in_meeting: false,
+            outside_work_hours: true,
+        };
+
+        let urgent = policy.evaluate_with(at_hour(21), &active_context(), None, 300, true, hints);
+        assert!(!urgent.is_open, "用户亲手划的边界高于「紧急」");
+        assert_eq!(
+            urgent.closed_reason,
+            Some(WindowClosedReason::OutsideWorkHours)
+        );
+    }
+
+    #[test]
+    fn 人不在优先于其他场合线索() {
+        let policy = WindowPolicy::new();
+        let mut ctx = active_context();
+        ctx.idle_seconds = 600;
+        let hints = WindowHints {
+            in_meeting: true,
+            outside_work_hours: true,
+        };
+
+        let window = policy.evaluate_with(at_hour(14), &ctx, None, 300, true, hints);
+        assert_eq!(window.closed_reason, Some(WindowClosedReason::Away));
+    }
+
+    #[test]
+    fn 工作时段优先于会议() {
+        let policy = WindowPolicy::new();
+        let hints = WindowHints {
+            in_meeting: true,
+            outside_work_hours: true,
+        };
+
+        let window = policy.evaluate_with(at_hour(14), &active_context(), None, 300, false, hints);
+        assert_eq!(
+            window.closed_reason,
+            Some(WindowClosedReason::OutsideWorkHours)
+        );
+    }
+
+    #[test]
+    fn 没有场合线索时与旧行为一致() {
+        let policy = WindowPolicy::new();
+        let old = policy.evaluate(at_hour(14), &active_context(), None, 300, false);
+        let new = policy.evaluate_with(
+            at_hour(14),
+            &active_context(),
+            None,
+            300,
+            false,
+            WindowHints::default(),
+        );
+        assert_eq!(old, new);
     }
 
     #[test]

@@ -22,7 +22,7 @@ import * as api from "../api";
 import { useCommand, useTacet } from "../hooks/useTacet";
 import { NeedIcon } from "../icons";
 import type { NeedKind, UpdateInfo, UserPreferences } from "../types";
-import { NEED_META } from "../types";
+import { NEED_META, formatMinuteOfDay, parseMinuteOfDay } from "../types";
 import "./Settings.css";
 
 /** 提醒间隔的可选范围（与 Rust 侧 ReminderRule 的夹取范围一致）。 */
@@ -498,6 +498,11 @@ export function Settings() {
     setSavedAt(null);
   };
 
+  const updateWorkHours = (patch: Partial<UserPreferences["workHours"]>) => {
+    setPrefs({ ...prefs, workHours: { ...prefs.workHours, ...patch } });
+    setSavedAt(null);
+  };
+
   const save = () => {
     void run(async () => {
       await api.savePreferences(prefs);
@@ -585,6 +590,116 @@ export function Settings() {
               )}
             </div>
           </div>
+        </section>
+
+        {/* ---------------------------------------------- 智能 */}
+        <section className="settings-section">
+          <div className="kicker settings-section-title">更懂你的时机</div>
+          <div className="settings-card">
+            <div className="setting-row compact">
+              <div className="setting-row-body wide">
+                <div className="setting-row-name">会议时先不打扰</div>
+                <div className="sub">
+                  麦克风正被占用（开会、通话）时，把提醒推迟到会后。
+                  只看「有没有程序在用麦克风」，不录音、不需要任何权限。
+                </div>
+              </div>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={prefs.meetingAware}
+                  onChange={(event) => update("meetingAware", event.target.checked)}
+                  aria-label="会议时先不打扰"
+                />
+                <span className="switch-track" aria-hidden>
+                  <span className="switch-thumb" />
+                </span>
+              </label>
+            </div>
+
+            <div className="setting-row compact">
+              <div className="setting-row-body wide">
+                <div className="setting-row-name">只在工作时段提醒</div>
+                <div className="sub">
+                  {prefs.workHours.enabled
+                    ? `${formatMinuteOfDay(prefs.workHours.startMinute)} – ${formatMinuteOfDay(prefs.workHours.endMinute)}${prefs.workHours.weekdaysOnly ? "，仅工作日" : ""}，其余时间保持安静`
+                    : "关闭时，任何时间都可能提醒"}
+                </div>
+              </div>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={prefs.workHours.enabled}
+                  onChange={(event) =>
+                    updateWorkHours({ enabled: event.target.checked })
+                  }
+                  aria-label="只在工作时段提醒"
+                />
+                <span className="switch-track" aria-hidden>
+                  <span className="switch-thumb" />
+                </span>
+              </label>
+            </div>
+
+            {prefs.workHours.enabled ? (
+              <div className="setting-row compact settings-hours">
+                <input
+                  type="time"
+                  className="setting-select"
+                  value={formatMinuteOfDay(prefs.workHours.startMinute)}
+                  onChange={(event) => {
+                    const minute = parseMinuteOfDay(event.target.value);
+                    if (minute !== null) updateWorkHours({ startMinute: minute });
+                  }}
+                  aria-label="工作开始时间"
+                />
+                <span className="sub">至</span>
+                <input
+                  type="time"
+                  className="setting-select"
+                  value={formatMinuteOfDay(prefs.workHours.endMinute)}
+                  onChange={(event) => {
+                    const minute = parseMinuteOfDay(event.target.value);
+                    if (minute !== null) updateWorkHours({ endMinute: minute });
+                  }}
+                  aria-label="工作结束时间"
+                />
+                <label className="settings-check sub">
+                  <input
+                    type="checkbox"
+                    checked={prefs.workHours.weekdaysOnly}
+                    onChange={(event) =>
+                      updateWorkHours({ weekdaysOnly: event.target.checked })
+                    }
+                  />
+                  仅工作日
+                </label>
+              </div>
+            ) : null}
+
+            <div className="setting-row compact">
+              <div className="setting-row-body wide">
+                <div className="setting-row-name">每日喝水目标</div>
+                <div className="sub">面板上会显示今天的进度，只展示、不催促</div>
+              </div>
+              <select
+                className="setting-select"
+                value={prefs.waterGoalCups}
+                onChange={(event) =>
+                  update("waterGoalCups", Number(event.target.value))
+                }
+              >
+                {[4, 5, 6, 7, 8, 9, 10, 12].map((cups) => (
+                  <option key={cups} value={cups}>
+                    {cups} 杯
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <p className="sub settings-note">
+            想临时安静一会儿？点菜单栏图标里的「勿扰」，可以选 30 分钟、1 小时、2 小时或到明早，到点自动恢复。
+          </p>
         </section>
 
         {/* ---------------------------------------------- 节奏 */}
